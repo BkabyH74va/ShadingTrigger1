@@ -1,10 +1,10 @@
-name: Build safe iOS demo IPA
+name: Build iOS exploit IPA
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - "SafeShadingDemo/**"
+      - "ShadingTrigger1/**"
       - ".github/workflows/ios-ipa.yml"
 
 permissions:
@@ -12,8 +12,7 @@ permissions:
 
 jobs:
   build:
-    # GitHub's Xcode 27 runner is Apple Silicon and includes the iOS 27 SDK.
-    runs-on: xcode-27
+    runs-on: macos-latest
     timeout-minutes: 30
 
     steps:
@@ -29,17 +28,17 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Generate the safe demo Xcode project
-        working-directory: SafeShadingDemo
+      - name: Generate Xcode project
+        working-directory: ShadingTrigger1
         run: xcodegen generate
 
       - name: Build unsigned iOS app
-        working-directory: SafeShadingDemo
+        working-directory: ShadingTrigger1
         run: |
           set -euo pipefail
           xcodebuild \
-            -project SafeShadingDemo.xcodeproj \
-            -scheme SafeShadingDemo \
+            -project ShadingTrigger1.xcodeproj \
+            -scheme ShadingTrigger1 \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
@@ -47,20 +46,20 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Package unsigned IPA for Sideloadly
+      - name: Package unsigned IPA
         run: |
           set -euo pipefail
-          APP_PATH="$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos/SafeShadingDemo.app"
+          APP_PATH="$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos/ShadingTrigger1.app"
           test -d "$APP_PATH"
           mkdir -p "$GITHUB_WORKSPACE/ipa/Payload"
           cp -R "$APP_PATH" "$GITHUB_WORKSPACE/ipa/Payload/"
           cd "$GITHUB_WORKSPACE/ipa"
-          /usr/bin/zip -qry "$GITHUB_WORKSPACE/SafeShadingDemo-unsigned.ipa" Payload
+          /usr/bin/zip -qry "$GITHUB_WORKSPACE/ShadingTrigger1-unsigned.ipa" Payload
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SafeShadingDemo-unsigned-IPA
-          path: SafeShadingDemo-unsigned.ipa
+          name: ShadingTrigger1-unsigned-IPA
+          path: ShadingTrigger1-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
