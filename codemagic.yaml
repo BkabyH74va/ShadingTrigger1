@@ -13,13 +13,20 @@ workflows:
           set -e
           PROJECT_PATH="$(find . -maxdepth 3 -name '*.xcodeproj' -print -quit)"
           if [ -z "$PROJECT_PATH" ]; then
-            echo "ERROR: No .xcodeproj found. Add a complete iOS Xcode project to the repository first."
+            echo "No Xcode project found"
             exit 1
           fi
-          PROJECT_NAME="$(basename "$PROJECT_PATH" .xcodeproj)"
           echo "Using project: $PROJECT_PATH"
-          echo "Using scheme: $PROJECT_NAME"
-          xcode-project build-ipa --project "$PROJECT_PATH" --scheme "$PROJECT_NAME"
+
+      - name: Configure signing
+        script: |
+          xcode-project use-profiles --warn-only
+
+      - name: Build IPA
+        script: |
+          xcode-project build-ipa \
+            --project "./ShadingTrigger.xcodeproj" \
+            --scheme "ShadingTrigger"
 
     artifacts:
       - build/ios/ipa/*.ipa
