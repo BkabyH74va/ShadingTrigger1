@@ -28,7 +28,7 @@ jobs:
           ls -la
           echo "=== SafeShadingDemo folder ==="
           ls -la SafeShadingDemo/ 2>/dev/null || echo "Not found"
-          echo "=== Inner SafeShadingDemo folder ==="
+          echo "=== Inner folder ==="
           ls -la SafeShadingDemo/SafeShadingDemo/ 2>/dev/null || echo "Not found"
 
       - name: Install XcodeGen
@@ -42,29 +42,22 @@ jobs:
           pwd
           echo "=== Files before xcodegen ==="
           ls -la
-          echo "=== project.yml contents ==="
-          cat project.yml
-          echo "=== Running xcodegen ==="
           xcodegen generate
-          echo "=== Exit code: $? ==="
           echo "=== Files after xcodegen ==="
           ls -la
           echo "=== Find .xcodeproj ==="
-          find . -name "*.xcodeproj" -type d 2>/dev/null || true
-          find .. -name "*.xcodeproj" -type d 2>/dev/null || true
+          find . -name "*.xcodeproj" -type d
 
       - name: Build unsigned iOS app
         run: |
           set -euo pipefail
           cd SafeShadingDemo/SafeShadingDemo
-          echo "=== Looking for .xcodeproj ==="
-          find . -name "*.xcodeproj" -type d
           PROJECT_PATH=$(find . -name "*.xcodeproj" -type d -print -quit)
           if [ -z "$PROJECT_PATH" ]; then
             echo "ERROR: No .xcodeproj found"
             exit 1
           fi
-          echo "Found project: $PROJECT_PATH"
+          echo "Building: $PROJECT_PATH"
           xcodebuild \
             -project "$PROJECT_PATH" \
             -scheme SafeShadingDemo \
@@ -78,12 +71,36 @@ jobs:
       - name: Package unsigned IPA
         run: |
           set -euo pipefail
-          APP_PATH="$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos/SafeShadingDemo.app"
-          test -d "$APP_PATH"
-          mkdir -p "$GITHUB_WORKSPACE/ipa/Payload"
-          cp -R "$APP_PATH" "$GITHUB_WORKSPACE/ipa/Payload/"
-          cd "$GITHUB_WORKSPACE/ipa"
-          /usr/bin/zip -qry "$GITHUB_WORKSPACE/SafeShadingDemo-unsigned.ipa" Payload
+          cd "$GITHUB_WORKSPACE"
+          
+          # Find the .app
+          APP_PATH=$(find build -name "SafeShadingDemo.app" -type d -path "*/Release-iphoneos/*" | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app found"
+            find build -name "*.app" -type d
+            exit 1
+          fi
+          echo "Found app: $APP_PATH"
+          
+          # Create IPA
+          rm -rf ipa
+          mkdir -p ipa/Payload
+          cp -R "$APP_PATH" ipa/Payload/
+          
+          # Verify
+          echo "=== IPA Payload ==="
+          ls -la ipa/Payload/
+          
+          # Zip it properly
+          cd ipa
+          zip -r ../SafeShadingDemo-unsigned.ipa Payload
+          cd ..
+          
+          # Verify IPA
+          echo "=== IPA file ==="
+          ls -lh SafeShadingDemo-unsigned.ipa
+          echo "=== IPA contents ==="
+          unzip -l SafeShadingDemo-unsigned.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
