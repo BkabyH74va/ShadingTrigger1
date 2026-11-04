@@ -1,0 +1,66 @@
+name: Build safe iOS demo IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "SafeShadingDemo/**"
+      - ".github/workflows/ios-ipa.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # GitHub's Xcode 27 runner is Apple Silicon and includes the iOS 27 SDK.
+    runs-on: xcode-27
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+          uname -m
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the safe demo Xcode project
+        working-directory: SafeShadingDemo
+        run: xcodegen generate
+
+      - name: Build unsigned iOS app
+        working-directory: SafeShadingDemo
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project SafeShadingDemo.xcodeproj \
+            -scheme SafeShadingDemo \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$GITHUB_WORKSPACE/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package unsigned IPA for Sideloadly
+        run: |
+          set -euo pipefail
+          APP_PATH="$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos/SafeShadingDemo.app"
+          test -d "$APP_PATH"
+          mkdir -p "$GITHUB_WORKSPACE/ipa/Payload"
+          cp -R "$APP_PATH" "$GITHUB_WORKSPACE/ipa/Payload/"
+          cd "$GITHUB_WORKSPACE/ipa"
+          /usr/bin/zip -qry "$GITHUB_WORKSPACE/SafeShadingDemo-unsigned.ipa" Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SafeShadingDemo-unsigned-IPA
+          path: SafeShadingDemo-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
