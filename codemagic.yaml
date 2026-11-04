@@ -1,0 +1,26 @@
+workflows:
+  ios-ipa:
+    name: iOS IPA
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
+    environment:
+      xcode: latest
+
+    scripts:
+      - name: Find Xcode project
+        script: |
+          set -e
+          PROJECT_PATH="$(find . -maxdepth 3 -name '*.xcodeproj' -print -quit)"
+          if [ -z "$PROJECT_PATH" ]; then
+            echo "ERROR: No .xcodeproj found. Add a complete iOS Xcode project to the repository first."
+            exit 1
+          fi
+          PROJECT_NAME="$(basename "$PROJECT_PATH" .xcodeproj)"
+          echo "Using project: $PROJECT_PATH"
+          echo "Using scheme: $PROJECT_NAME"
+          xcode-project build-ipa --project "$PROJECT_PATH" --scheme "$PROJECT_NAME"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
