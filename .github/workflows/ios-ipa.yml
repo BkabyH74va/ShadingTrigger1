@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "ShadingTrigger1/**"
+      - "SafeShadingDemo/**"
       - ".github/workflows/ios-ipa.yml"
 
 permissions:
@@ -29,16 +29,16 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        working-directory: ShadingTrigger1
+        working-directory: SafeShadingDemo
         run: xcodegen generate
 
       - name: Build unsigned iOS app
-        working-directory: ShadingTrigger1
+        working-directory: SafeShadingDemo
         run: |
           set -euo pipefail
           xcodebuild \
-            -project ShadingTrigger1.xcodeproj \
-            -scheme ShadingTrigger1 \
+            -project SafeShadingDemo.xcodeproj \
+            -scheme SafeShadingDemo \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
@@ -49,17 +49,17 @@ jobs:
       - name: Package unsigned IPA
         run: |
           set -euo pipefail
-          APP_PATH="$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos/ShadingTrigger1.app"
+          APP_PATH="$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos/SafeShadingDemo.app"
           test -d "$APP_PATH"
           mkdir -p "$GITHUB_WORKSPACE/ipa/Payload"
           cp -R "$APP_PATH" "$GITHUB_WORKSPACE/ipa/Payload/"
           cd "$GITHUB_WORKSPACE/ipa"
-          /usr/bin/zip -qry "$GITHUB_WORKSPACE/ShadingTrigger1-unsigned.ipa" Payload
+          /usr/bin/zip -qry "$GITHUB_WORKSPACE/SafeShadingDemo-unsigned.ipa" Payload
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ShadingTrigger1-unsigned-IPA
-          path: ShadingTrigger1-unsigned.ipa
+          name: SafeShadingDemo-unsigned-IPA
+          path: SafeShadingDemo-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
