@@ -19,27 +19,31 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Show toolchain
+      - name: Show toolchain and files
         run: |
           xcodebuild -version
           xcodebuild -showsdks
           uname -m
-          ls -la  # Debug: show files
+          echo "=== Root files ==="
+          ls -la
+          echo "=== SafeShadingDemo files ==="
+          ls -la SafeShadingDemo/ || true
+          echo "=== Inner SafeShadingDemo files ==="
+          ls -la SafeShadingDemo/SafeShadingDemo/ || true
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
       - name: Generate Xcode project
         run: |
-          cd SafeShadingDemo
-          ls -la  # Debug: show files in folder
+          cd SafeShadingDemo/SafeShadingDemo  # ← Updated path
           xcodegen generate
-          ls -la  # Debug: show generated files
+          ls -la
 
       - name: Build unsigned iOS app
         run: |
           set -euo pipefail
-          cd SafeShadingDemo
+          cd SafeShadingDemo/SafeShadingDemo  # ← Updated path
           xcodebuild \
             -project SafeShadingDemo.xcodeproj \
             -scheme SafeShadingDemo \
