@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>$(EXECUTABLE_NAME)</string>
+    <string>SafeShadingDemo</string>
     <key>CFBundleIdentifier</key>
     <string>com.jasonquiles.SafeShadingDemo</string>
     <key>CFBundleInfoDictionaryVersion</key>
