@@ -1,11 +1,11 @@
-name: ShadingTrigger1
+name: SafeShadingDemo
 options:
   bundleIdPrefix: com.jasonquiles
   deploymentTarget:
     iOS: "15.0"
 
 targets:
-  ShadingTrigger1:
+  SafeShadingDemo:
     type: application
     platform: iOS
     sources:
@@ -16,9 +16,9 @@ targets:
     info:
       path: Info.plist
       properties:
-        CFBundleName: ShadingTrigger1
-        CFBundleDisplayName: ShadingTrigger1
-        CFBundleIdentifier: com.jasonquiles.ShadingTrigger1
+        CFBundleName: SafeShadingDemo
+        CFBundleDisplayName: SafeShadingDemo
+        CFBundleIdentifier: com.jasonquiles.SafeShadingDemo
         CFBundleVersion: 1
         CFBundleShortVersionString: 1.0
         UIApplicationSceneManifest:
@@ -27,7 +27,7 @@ targets:
           UIColorName: ""
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.jasonquiles.ShadingTrigger1
+        PRODUCT_BUNDLE_IDENTIFIER: com.jasonquiles.SafeShadingDemo
         TARGETED_DEVICE_FAMILY: "1,2"
         IPHONEOS_DEPLOYMENT_TARGET: "15.0"
         SWIFT_VERSION: "5.0"
