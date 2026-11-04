@@ -24,18 +24,22 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks
           uname -m
+          ls -la  # Debug: show files
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        working-directory: SafeShadingDemo
-        run: xcodegen generate
+        run: |
+          cd SafeShadingDemo
+          ls -la  # Debug: show files in folder
+          xcodegen generate
+          ls -la  # Debug: show generated files
 
       - name: Build unsigned iOS app
-        working-directory: SafeShadingDemo
         run: |
           set -euo pipefail
+          cd SafeShadingDemo
           xcodebuild \
             -project SafeShadingDemo.xcodeproj \
             -scheme SafeShadingDemo \
