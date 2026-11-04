@@ -19,33 +19,54 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Show toolchain and files
+      - name: Show toolchain and structure
         run: |
           xcodebuild -version
           xcodebuild -showsdks
           uname -m
-          echo "=== Root files ==="
+          echo "=== Repo root ==="
           ls -la
-          echo "=== SafeShadingDemo files ==="
-          ls -la SafeShadingDemo/ || true
-          echo "=== Inner SafeShadingDemo files ==="
-          ls -la SafeShadingDemo/SafeShadingDemo/ || true
+          echo "=== SafeShadingDemo folder ==="
+          ls -la SafeShadingDemo/ 2>/dev/null || echo "Not found"
+          echo "=== Inner SafeShadingDemo folder ==="
+          ls -la SafeShadingDemo/SafeShadingDemo/ 2>/dev/null || echo "Not found"
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
       - name: Generate Xcode project
         run: |
-          cd SafeShadingDemo/SafeShadingDemo  # ← Updated path
-          xcodegen generate
+          set -e
+          cd SafeShadingDemo/SafeShadingDemo
+          echo "=== Current directory ==="
+          pwd
+          echo "=== Files before xcodegen ==="
           ls -la
+          echo "=== project.yml contents ==="
+          cat project.yml
+          echo "=== Running xcodegen ==="
+          xcodegen generate
+          echo "=== Exit code: $? ==="
+          echo "=== Files after xcodegen ==="
+          ls -la
+          echo "=== Find .xcodeproj ==="
+          find . -name "*.xcodeproj" -type d 2>/dev/null || true
+          find .. -name "*.xcodeproj" -type d 2>/dev/null || true
 
       - name: Build unsigned iOS app
         run: |
           set -euo pipefail
-          cd SafeShadingDemo/SafeShadingDemo  # ← Updated path
+          cd SafeShadingDemo/SafeShadingDemo
+          echo "=== Looking for .xcodeproj ==="
+          find . -name "*.xcodeproj" -type d
+          PROJECT_PATH=$(find . -name "*.xcodeproj" -type d -print -quit)
+          if [ -z "$PROJECT_PATH" ]; then
+            echo "ERROR: No .xcodeproj found"
+            exit 1
+          fi
+          echo "Found project: $PROJECT_PATH"
           xcodebuild \
-            -project SafeShadingDemo.xcodeproj \
+            -project "$PROJECT_PATH" \
             -scheme SafeShadingDemo \
             -configuration Release \
             -sdk iphoneos \
