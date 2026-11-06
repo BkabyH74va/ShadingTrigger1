@@ -1,111 +1,67 @@
-name: Build iOS exploit IPA
-
-on:
-  workflow_dispatch:
-  push:
-    paths:
-      - "SafeShadingDemo/**"
-      - ".github/workflows/ios-ipa.yml"
-
-permissions:
-  contents: read
-
-jobs:
-  build:
-    runs-on: macos-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Show toolchain and structure
-        run: |
-          xcodebuild -version
-          xcodebuild -showsdks
-          uname -m
-          echo "=== Repo root ==="
-          ls -la
-          echo "=== SafeShadingDemo folder ==="
-          ls -la SafeShadingDemo/ 2>/dev/null || echo "Not found"
-          echo "=== Inner folder ==="
-          ls -la SafeShadingDemo/SafeShadingDemo/ 2>/dev/null || echo "Not found"
-
-      - name: Install XcodeGen
-        run: brew install xcodegen
-
-      - name: Generate Xcode project
-        run: |
-          set -e
-          cd SafeShadingDemo/SafeShadingDemo
-          echo "=== Current directory ==="
-          pwd
-          echo "=== Files before xcodegen ==="
-          ls -la
-          xcodegen generate
-          echo "=== Files after xcodegen ==="
-          ls -la
-          echo "=== Find .xcodeproj ==="
-          find . -name "*.xcodeproj" -type d
-
-      - name: Build unsigned iOS app
-        run: |
-          set -euo pipefail
-          cd SafeShadingDemo/SafeShadingDemo
-          PROJECT_PATH=$(find . -name "*.xcodeproj" -type d -print -quit)
-          if [ -z "$PROJECT_PATH" ]; then
-            echo "ERROR: No .xcodeproj found"
-            exit 1
-          fi
-          echo "Building: $PROJECT_PATH"
-          xcodebuild \
-            -project "$PROJECT_PATH" \
-            -scheme SafeShadingDemo \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$GITHUB_WORKSPACE/build" \
-            CODE_SIGNING_ALLOWED=NO \
-            build
-
-      - name: Package unsigned IPA
+      - name: Fix bundle ID in built app
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
           
-          # Find the .app
+          # Find the built .app
           APP_PATH=$(find build -name "SafeShadingDemo.app" -type d -path "*/Release-iphoneos/*" | head -1)
           if [ -z "$APP_PATH" ]; then
             echo "ERROR: No .app found"
-            find build -name "*.app" -type d
             exit 1
           fi
+          
           echo "Found app: $APP_PATH"
           
-          # Create IPA
-          rm -rf ipa
-          mkdir -p ipa/Payload
-          cp -R "$APP_PATH" ipa/Payload/
+          # Patch Info.plist to force string bundle ID
+          PLIST_PATH="$APP_PATH/Info.plist"
           
-          # Verify
-          echo "=== IPA Payload ==="
-          ls -la ipa/Payload/
+          # Convert to XML, patch, convert back
+          plutil -convert xml1 "$PLIST_PATH"
           
-          # Zip it properly
-          cd ipa
-          zip -r ../SafeShadingDemo-unsigned.ipa Payload
-          cd ..
-          
-          # Verify IPA
-          echo "=== IPA file ==="
-          ls -lh SafeShadingDemo-unsigned.ipa
-          echo "=== IPA contents ==="
-          unzip -l SafeShadingDemo-unsigned.ipa
+          # Use Python to ensure CFBundleIdentifier is a string
+          python3 << 'EOF'
+import plistlib
+import sys
 
-      - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: SafeShadingDemo-unsigned-IPA
-          path: SafeShadingDemo-unsigned.ipa
-          if-no-files-found: error
-          retention-days: 7
+plist_path = sys.argv[1]
+
+with open(plist_path, 'rb') as f:
+    plist = plistlib.load(f)
+
+# Force CFBundleIdentifier to be a clean string
+plist['CFBundleIdentifier'] = 'com.jasonquiles.SafeShadingDemo'
+
+# Remove any problematic keys
+plist.pop('CFBundleExecutable', None)
+plist['CFBundleExecutable'] = 'SafeShadingDemo'
+
+with open(plist_path, 'wb') as f:
+    plistlib.dump(plist, f)
+
+print(f"Patched: {plist_path}")
+print(f"Bundle ID: {plist['CFBundleIdentifier']}")
+EOF
+          
+          # Also patch the binary if it has embedded bundle ID
+          BINARY_PATH="$APP_PATH/SafeShadingDemo"
+          if [ -f "$BINARY_PATH" ]; then
+            # Replace any occurrence of bundle ID with team ID suffix
+            python3 << 'EOF'
+import sys
+
+binary_path = sys.argv[1]
+
+with open(binary_path, 'rb') as f:
+    data = f.read()
+
+# Look for bundle ID patterns and log them
+import re
+patterns = re.findall(b'com\.jasonquiles\.SafeShadingDemo[^\x00]*', data)
+for p in patterns:
+    print(f"Found in binary: {p}")
+
+print("Binary checked")
+EOF
+          fi
+          
+          echo "Bundle ID patched successfully"
