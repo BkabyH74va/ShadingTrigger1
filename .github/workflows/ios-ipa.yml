@@ -84,24 +84,12 @@ jobs:
           PLIST_PATH="$APP_PATH/Info.plist"
           plutil -convert xml1 "$PLIST_PATH"
           
-          python3 << 'EOF'
-import plistlib
-import sys
-
-plist_path = sys.argv[1]
-
-with open(plist_path, 'rb') as f:
-    plist = plistlib.load(f)
-
-plist['CFBundleIdentifier'] = 'com.jasonquiles.SafeShadingDemo'
-plist['CFBundleExecutable'] = 'SafeShadingDemo'
-
-with open(plist_path, 'wb') as f:
-    plistlib.dump(plist, f)
-
-print(f"Patched: {plist_path}")
-print(f"Bundle ID: {plist['CFBundleIdentifier']}")
-EOF
+          # Use plutil to set values directly
+          plutil -replace CFBundleIdentifier -string "com.jasonquiles.SafeShadingDemo" "$PLIST_PATH"
+          plutil -replace CFBundleExecutable -string "SafeShadingDemo" "$PLIST_PATH"
+          
+          echo "=== Patched Info.plist ==="
+          plutil -p "$PLIST_PATH"
 
       - name: Package unsigned IPA
         run: |
