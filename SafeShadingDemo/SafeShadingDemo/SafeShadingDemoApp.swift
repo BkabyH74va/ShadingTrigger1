@@ -17,6 +17,21 @@ struct ContentView: View {
     @State private var status = "Ready to trigger CVE-2026-112611"
     @State private var isTriggering = false
     
+    // Get clean bundle ID without Team ID suffix
+    var cleanBundleID: String {
+        let fullID = Bundle.main.bundleIdentifier ?? "unknown"
+        // Remove Team ID suffix if present
+        // e.g., "com.jasonquiles.SafeShadingDemo.8SWJXLX2V6" -> "com.jasonquiles.SafeShadingDemo"
+        if let lastDot = fullID.lastIndex(of: ".") {
+            let suffix = fullID[fullID.index(after: lastDot)...]
+            // Check if suffix looks like a Team ID (10 chars, alphanumeric)
+            if suffix.count == 10 && suffix.allSatisfy({ $0.isLetter || $0.isNumber }) {
+                return String(fullID[..<lastDot])
+            }
+        }
+        return fullID
+    }
+    
     var body: some View {
         VStack(spacing: 30) {
             Text("CVE-2026-112611")
@@ -25,6 +40,10 @@ struct ContentView: View {
             
             Text("CoreGraphics Type-5 Shading OOB")
                 .font(.headline)
+            
+            Text("Bundle ID: \(cleanBundleID)")
+                .font(.caption)
+                .foregroundColor(.secondary)
             
             Text(status)
                 .font(.system(.body, design: .monospaced))
