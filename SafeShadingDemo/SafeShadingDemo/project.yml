@@ -18,16 +18,15 @@ targets:
       properties:
         CFBundleName: SafeShadingDemo
         CFBundleDisplayName: SafeShadingDemo
-        CFBundleIdentifier: com.jasonquiles.SafeShadingDemo.1.8SWJXLX2V6
+        CFBundleIdentifier: com.jasonquiles.SafeShadingDemo
         CFBundleVersion: 1
         CFBundleShortVersionString: 1.0
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        UILaunchScreen:
-          UIColorName: ""
+        UILaunchScreen: {}
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.jasonquiles.SafeShadingDemo.1.8SWJXLX2V6
+        PRODUCT_BUNDLE_IDENTIFIER: com.jasonquiles.SafeShadingDemo
         TARGETED_DEVICE_FAMILY: "1,2"
         IPHONEOS_DEPLOYMENT_TARGET: "15.0"
         SWIFT_VERSION: "5.0"
