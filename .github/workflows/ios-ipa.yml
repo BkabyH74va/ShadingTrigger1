@@ -91,6 +91,24 @@ jobs:
           echo "=== Patched Info.plist ==="
           plutil -p "$PLIST_PATH"
 
+          # Fail the build if identifiers or version metadata are not strings.
+          python3 - "$PLIST_PATH" <<'PY'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as f:
+              p = plistlib.load(f)
+          expected = {
+              "CFBundleIdentifier": "com.jasonquiles.SafeShadingDemo",
+              "CFBundleExecutable": "SafeShadingDemo",
+              "CFBundleVersion": "2",
+              "CFBundleShortVersionString": "1.0.1",
+          }
+          for key, value in expected.items():
+              actual = p.get(key)
+              if not isinstance(actual, str) or actual != value:
+                  raise SystemExit(f"Invalid {key}: expected string {value!r}, got {actual!r} ({type(actual).__name__})")
+          print("Info.plist validation passed: bundle ID and version fields are strings.")
+          PY
+
       - name: Package unsigned IPA
         run: |
           set -euo pipefail
