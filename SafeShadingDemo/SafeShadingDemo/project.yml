@@ -19,8 +19,8 @@ targets:
         CFBundleName: SafeShadingDemo
         CFBundleDisplayName: SafeShadingDemo
         CFBundleIdentifier: com.jasonquiles.SafeShadingDemo
-        CFBundleVersion: "1"
-        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.0.1"
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UILaunchScreen: {}
