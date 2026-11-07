@@ -2,47 +2,54 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
-// MARK: - Force Clean Bundle ID at Launch
-// This runs BEFORE SwiftUI initializes to prevent CFBundleGetMainBundle crash
+// MARK: - Runtime Bundle ID Fix (runs before main)
+// Prevents CFBundleGetMainBundle crash from corrupted bundle ID
 
-class BundleIDFix {
-    static func apply() {
-        // Override bundleIdentifier to return clean string without Team ID suffix
-        let originalMethod = class_getInstanceMethod(Bundle.self, #selector(getter: Bundle.bundleIdentifier))
-        let swizzledMethod = class_getInstanceMethod(Bundle.self, #selector(Bundle.cleanBundleIdentifier))
+static func fixBundleID() {
+    // Get main bundle path
+    guard let bundlePath = Bundle.main.bundlePath as String? else { return }
+    let plistPath = (bundlePath as NSString).appendingPathComponent("Info.plist")
+    
+    // Read current plist
+    guard let plistData = FileManager.default.contents(atPath: plistPath) else { return }
+    
+    // Parse plist
+    guard var plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any] else { return }
+    
+    // Get current bundle ID
+    let currentID = plist["CFBundleIdentifier"] as? String ?? "unknown"
+    
+    // Fix if corrupted (has team ID suffix or wrong type)
+    if currentID.contains(".8SWJXLX2V6") || currentID.contains(".1.") {
+        plist["CFBundleIdentifier"] = "com.jasonquiles.SafeShadingDemo"
         
-        if let original = originalMethod, let swizzled = swizzledMethod {
-            method_exchangeImplementations(original, swizzled)
+        // Also fix CFBundleExecutable if needed
+        if let exec = plist["CFBundleExecutable"], !(exec is String) {
+            plist["CFBundleExecutable"] = "SafeShadingDemo"
         }
-    }
-}
-
-extension Bundle {
-    @objc func cleanBundleIdentifier() -> String? {
-        // Get the original (swizzled) identifier
-        let originalID = self.cleanBundleIdentifier() // This calls the original implementation due to swizzling
         
-        guard let fullID = originalID else { return nil }
-        
-        // Strip Team ID suffix if present
-        // e.g., "com.jasonquiles.SafeShadingDemo.8SWJXLX2V6" -> "com.jasonquiles.SafeShadingDemo"
-        if let lastDot = fullID.lastIndex(of: ".") {
-            let suffix = fullID[fullID.index(after: lastDot)...]
-            // Team ID is 10 alphanumeric characters
-            if suffix.count == 10 && suffix.allSatisfy({ $0.isLetter || $0.isNumber }) {
-                return String(fullID[..<lastDot])
+        // Fix version strings if they're numbers
+        for key in ["CFBundleVersion", "CFBundleShortVersionString"] {
+            if let val = plist[key], !(val is String) {
+                plist[key] = String(describing: val)
             }
         }
-        return fullID
+        
+        // Write back
+        if let newData = try? PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0) {
+            try? newData.write(to: URL(fileURLWithPath: plistPath))
+        }
     }
 }
+
+// Call fix immediately on load
+fixBundleID()
 
 // MARK: - App Entry Point
 @main
 struct SafeShadingDemoApp: App {
     init() {
-        // Apply bundle ID fix before anything else
-        BundleIDFix.apply()
+        // Bundle ID already fixed above
     }
     
     var body: some Scene {
