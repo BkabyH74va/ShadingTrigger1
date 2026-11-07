@@ -5,7 +5,7 @@ import Foundation
 // MARK: - Runtime Bundle ID Fix (runs before main)
 // Prevents CFBundleGetMainBundle crash from corrupted bundle ID
 
-static func fixBundleID() {
+func fixBundleID() {
     // Get main bundle path
     guard let bundlePath = Bundle.main.bundlePath as String? else { return }
     let plistPath = (bundlePath as NSString).appendingPathComponent("Info.plist")
